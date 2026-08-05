@@ -1,0 +1,10 @@
+{
+  "name": "spark-live",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Spark Live — live transcription with self-correction + Dari translation for an audience.",
+  "type": "module",
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}

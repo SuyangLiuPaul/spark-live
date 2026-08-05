@@ -1,0 +1,22 @@
+{
+  "name": "Spark Live — 即時轉譯 · ترجمه زنده",
+  "short_name": "Spark Live",
+  "description": "Live transcription with self-correction, translated to Dari, English and Chinese for an audience.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0f17",
+  "theme_color": "#0b0f17",
+  "categories": ["productivity", "utilities"],
+  "lang": "zh-Hant",
+  "dir": "auto",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "主控台 Presenter", "url": "/", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

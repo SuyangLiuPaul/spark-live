@@ -1,0 +1,200 @@
+:root{
+  --bg:#0b0f17; --panel:#141b28; --panel2:#1b2434; --line:#26324a;
+  --fg:#e8eef8; --dim:#93a3bd; --faint:#5f708c;
+  --accent:#57c9ff; --accent2:#7dffb0; --warn:#ffc65c; --bad:#ff7a6a;
+  --radius:14px;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+  line-height:1.55; overflow-x:hidden;
+}
+.rtl{
+  direction:rtl; text-align:right;
+  font-family:"Noto Naskh Arabic","Vazirmatn","Geeza Pro","Iranian Sans",Tahoma,serif;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:18px 16px 60px}
+h1{font-size:20px;font-weight:800;letter-spacing:.02em}
+h2{font-size:13px;font-weight:700;color:var(--dim);letter-spacing:.14em;text-transform:uppercase;margin-bottom:10px}
+.sub{color:var(--dim);font-size:13px}
+
+.topbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.brand{display:flex;align-items:center;gap:9px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--faint);flex:none}
+.dot.on{background:var(--accent2);box-shadow:0 0 12px var(--accent2)}
+.dot.bad{background:var(--bad)}
+.spacer{flex:1}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:14px}
+.grid{display:grid;gap:12px}
+@media(min-width:860px){ .grid.two{grid-template-columns:1fr 1fr} }
+
+label{display:block;font-size:12px;color:var(--dim);margin-bottom:5px;font-weight:600}
+input,textarea,select{
+  width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+  border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit;
+}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent)}
+textarea{resize:vertical;min-height:74px;line-height:1.5}
+.field{margin-bottom:12px}
+.hint{font-size:11.5px;color:var(--faint);margin-top:4px;line-height:1.5}
+
+button{
+  background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+  border-radius:11px;padding:11px 18px;font-size:14px;font-weight:700;cursor:pointer;
+  font-family:inherit;transition:.15s;
+}
+button:hover{border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.primary{background:linear-gradient(180deg,#4fc4ff,#2a86d8);border-color:transparent;color:#04121f}
+.danger{background:linear-gradient(180deg,#ff8a76,#d9503c);border-color:transparent;color:#210806}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
+.code{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:30px;font-weight:800;
+  letter-spacing:.22em;color:var(--accent2);
+}
+.joinbox{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.qr{background:#fff;padding:8px;border-radius:10px;line-height:0}
+.qr img,.qr canvas{display:block;width:120px;height:120px}
+
+.meter{height:6px;background:var(--panel2);border-radius:4px;overflow:hidden;margin:10px 0 4px}
+.meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent2),var(--accent));transition:width .1s}
+
+.lines{display:flex;flex-direction:column;gap:12px}
+.line{border-left:3px solid var(--line);padding:2px 0 2px 12px;animation:in .25s ease both}
+.line.pending{opacity:.62;border-left-color:var(--warn)}
+.line.failed{border-left-color:var(--bad)}
+.line .dari{font-size:20px;line-height:1.75}
+.line .src{font-size:12.5px;color:var(--dim);margin-top:3px}
+@keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+.draft{color:var(--faint);font-style:italic;min-height:22px;font-size:14px;margin-top:8px}
+.err{color:var(--bad);font-size:12px;margin-top:8px;word-break:break-word}
+.pill{font-size:11.5px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:4px 10px}
+
+/* ── audience view ── */
+.stage{min-height:100vh;display:flex;flex-direction:column;padding:0}
+.stagebar{
+  display:flex;align-items:center;gap:10px;padding:10px 14px;
+  border-bottom:1px solid var(--line);background:rgba(11,15,23,.92);
+  position:sticky;top:0;z-index:5;backdrop-filter:blur(8px);flex-wrap:wrap;
+}
+.feed{flex:1;padding:20px 18px 40vh;max-width:1000px;margin:0 auto;width:100%}
+.entry{margin-bottom:26px;animation:in .3s ease both}
+.entry .dari{font-size:var(--dsize,30px);line-height:1.85;font-weight:500}
+.entry .src{font-size:calc(var(--dsize,30px) * .44);color:var(--faint);margin-top:8px;line-height:1.5}
+.entry.pending .dari{opacity:.55}
+.entry.live{border-left:3px solid var(--warn);padding-left:14px}
+.iconbtn{padding:8px 12px;font-size:13px}
+.big{font-size:15px}
+.center{text-align:center}
+.empty{color:var(--faint);text-align:center;padding:60px 20px;font-size:15px}
+
+/* ── audience language selector (top-right) ── */
+.langsel{display:flex;gap:4px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:999px;padding:3px}
+.langsel .lang{border:none;background:transparent;border-radius:999px;
+  padding:7px 13px;font-size:13.5px;font-weight:700;color:var(--dim)}
+.langsel .lang.on{background:linear-gradient(180deg,#4fc4ff,#2a86d8);color:#04121f}
+.langsel .lang:hover{border:none;color:var(--fg)}
+
+/* ── simplified presenter ── */
+.big-start{font-size:19px;padding:15px 46px;border-radius:14px}
+details.adv{padding:0}
+details.adv summary{
+  cursor:pointer;padding:15px 16px;font-size:13.5px;font-weight:700;color:var(--dim);
+  list-style:none;user-select:none;
+}
+details.adv summary::-webkit-details-marker{display:none}
+details.adv summary::before{content:"▸ ";color:var(--accent)}
+details.adv[open] summary::before{content:"▾ "}
+details.adv summary:hover{color:var(--fg)}
+details.adv > *:not(summary){margin-left:16px;margin-right:16px}
+details.adv > *:last-child{margin-bottom:16px}
+
+/* ── target-language picker ── */
+.langpick{display:flex;flex-wrap:wrap;gap:7px}
+.langpick button{padding:8px 14px;font-size:13px;border-radius:999px;font-weight:600;color:var(--dim)}
+.langpick button.on{color:#04121f;background:linear-gradient(180deg,#7dffb0,#2fc088);border-color:transparent}
+.langpick button.on::before{content:"✓ "}
+
+/* ── UI language switch ── */
+.uisel{display:flex;gap:3px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:999px;padding:3px;margin-left:10px}
+.uisel .uibtn{border:none;background:transparent;border-radius:999px;
+  padding:6px 12px;font-size:12.5px;font-weight:700;color:var(--dim)}
+.uisel .uibtn.on{background:linear-gradient(180deg,#4fc4ff,#2a86d8);color:#04121f}
+.uisel .uibtn:hover{border:none;color:var(--fg)}
+
+/* ── editable session code ── */
+.codeinput{
+  width:auto;min-width:200px;background:transparent;border:1px dashed var(--line);
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:30px;font-weight:800;
+  letter-spacing:.22em;color:var(--accent2);padding:4px 10px;border-radius:10px;
+}
+.codeinput:hover{border-color:var(--accent)}
+.codeinput:disabled{opacity:.7;border-style:solid;cursor:not-allowed}
+
+/* ── RTL operator console ── */
+.ui-rtl .wrap{direction:rtl}
+.ui-rtl .line{border-left:none;border-right:3px solid var(--line);padding:2px 12px 2px 0}
+.ui-rtl .line.pending{border-right-color:var(--warn)}
+.ui-rtl .line.failed{border-right-color:var(--bad)}
+.ui-rtl .code, .ui-rtl #joinUrl{direction:ltr;text-align:left}
+.ui-rtl .langpick, .ui-rtl .row{direction:rtl}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Naskh Arabic","PingFang SC","Microsoft YaHei",sans-serif}
+
+/* ═══════════════════════════════════════════════════════════════
+   Responsive / overflow hardening
+   Flex children default to min-width:auto, so a wide child (the code
+   input, a long URL) pushes past its card instead of shrinking. This
+   block makes every container able to shrink, then tunes for phones.
+   ═══════════════════════════════════════════════════════════════ */
+.panel, .field, .row, .joinbox, .joinbox > *, .brand, .topbar { min-width: 0; }
+.panel { overflow: hidden; }
+input, textarea, select, .codeinput { max-width: 100%; box-sizing: border-box; }
+
+.codeinput{
+  width: 100%; min-width: 0;
+  font-size: clamp(22px, 7vw, 30px);
+  letter-spacing: clamp(.10em, 3vw, .22em);
+}
+#joinUrl { overflow-wrap: anywhere; }
+
+.joinbox { align-items: flex-start; }
+.joinbox > div:last-child { flex: 1 1 240px; }
+.qr img, .qr canvas { width: clamp(96px, 28vw, 120px); height: clamp(96px, 28vw, 120px); }
+
+/* language pills: cap the height on phones so the Start button stays reachable */
+.langpick { max-height: 168px; overflow-y: auto; padding-right: 2px; }
+.langpick::-webkit-scrollbar { width: 4px; }
+.langpick::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+
+@media (max-width: 640px){
+  .wrap { padding: 12px 12px 48px; }
+  .panel { padding: 14px; border-radius: 12px; }
+  h1 { font-size: 18px; }
+  .topbar { gap: 8px; row-gap: 6px; }
+  .topbar .sub { font-size: 12px; order: 3; flex: 1 1 100%; }
+  .uisel { margin-left: 0; order: 2; }
+  .big-start { width: 100%; text-align: center; padding: 15px 20px; }
+  .row > button { flex: 1 1 auto; }
+  .langpick button { padding: 8px 12px; font-size: 12.5px; }
+  .grid.two { grid-template-columns: 1fr; }
+  .joinbox { gap: 12px; }
+  .stagebar { gap: 6px; padding: 8px 10px; }
+  .langsel .lang, .uisel .uibtn { padding: 7px 10px; font-size: 12.5px; }
+}
+@media (max-width: 380px){
+  .code, .codeinput { letter-spacing: .06em; }
+  .iconbtn { padding: 7px 9px; }
+}
+
+/* Respect users who ask for less motion. */
+@media (prefers-reduced-motion: reduce){
+  .start-btn { animation: none; }
+  * { transition-duration: .01ms !important; }
+}

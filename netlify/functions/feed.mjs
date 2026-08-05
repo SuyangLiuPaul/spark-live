@@ -1,0 +1,55 @@
+import { getStore } from "@netlify/blobs";
+
+/**
+ * Audience → relay. Returns the current session document.
+ *
+ * Deliberately dumb + cacheable: netlify.toml puts `s-maxage=1` on this path so
+ * the CDN answers nearly every viewer poll, and the function itself runs about
+ * once per second regardless of how many people are in the room.
+ *
+ * GET /api/feed?s=CODE[&v=N]   → 200 doc | 204 (unchanged) | 404
+ */
+const CORS = { "Access-Control-Allow-Origin": "*" };
+
+export default async (req) => {
+  const url = new URL(req.url);
+  const session = String(url.searchParams.get("s") || "").trim().toUpperCase();
+  const since = Number(url.searchParams.get("v") || -1);
+
+  if (!/^[A-Z0-9]{4,12}$/.test(session)) {
+    return new Response(JSON.stringify({ error: "bad_session" }), {
+      status: 400,
+      headers: { "content-type": "application/json", "cache-control": "no-store", ...CORS },
+    });
+  }
+
+  const store = getStore({ name: "spark-live", consistency: "strong" });
+  let rec = null;
+  try {
+    rec = await store.get(`s/${session}.json`, { type: "json" });
+  } catch {
+    rec = null;
+  }
+
+  if (!rec || !rec.doc) {
+    return new Response(JSON.stringify({ error: "not_found" }), {
+      status: 404,
+      headers: { "content-type": "application/json", "cache-control": "no-store", ...CORS },
+    });
+  }
+
+  // Never leak the presenter's publish token to viewers.
+  const doc = rec.doc;
+
+  if (since >= 0 && Number(doc.v) <= since) {
+    // A 204 MUST carry a null body — passing "" makes the runtime emit a 502.
+    return new Response(null, { status: 204, headers: { ...CORS } });
+  }
+
+  return new Response(JSON.stringify(doc), {
+    status: 200,
+    headers: { "content-type": "application/json", ...CORS },
+  });
+};
+
+export const config = { path: "/api/feed" };

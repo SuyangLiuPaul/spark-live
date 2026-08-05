@@ -1,0 +1,6 @@
+# Local pre-fill of API keys — NEVER commit, publicly readable if deployed
+public/config.js
+
+node_modules/
+.netlify/
+.DS_Store

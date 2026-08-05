@@ -1,0 +1,31 @@
+# Spark Live — presenter console + audience view + tiny relay.
+# Deployed standalone so it can never disturb the production `sparkers` site.
+
+[build]
+  publish = "public"
+  command = "echo 'static frontend — functions are bundled automatically'"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "microphone=(self)"
+
+# The audience feed is polled ~1/s by every viewer. `s-maxage=1` lets the
+# Netlify CDN collapse all of those into roughly ONE function invocation per
+# second no matter how many people are watching — this is what keeps a full
+# room inside the free tier.
+[[headers]]
+  for = "/api/feed"
+  [headers.values]
+    Cache-Control = "public, s-maxage=1, stale-while-revalidate=4"
+
+[[redirects]]
+  from = "/join/:code"
+  to = "/view.html?s=:code"
+  status = 200

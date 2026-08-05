@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Spark Live — Presenter</title>
+<meta name="description" content="Live transcription with self-correction, translated for your audience in real time." />
+<meta name="theme-color" content="#0b0f17" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Spark Live" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="icon" href="/favicon-32.png" sizes="32x32" />
+<link rel="icon" href="/icons/icon-192.png" sizes="192x192" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<meta property="og:title" content="Spark Live — live transcription & translation" />
+<meta property="og:description" content="دری · English · 中文 and more" />
+<meta property="og:image" content="/og-card.png" />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&display=swap" />
+<link rel="stylesheet" href="/styles.css?v=4" />
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand">
+      <span class="dot" id="dot"></span>
+      <h1>Spark Live</h1>
+    </div>
+    <span class="pill" id="statePill" data-i18n="stateIdle">Not started</span>
+    <div class="spacer"></div>
+    <span class="sub" data-i18n="tagline">English / Chinese → any language</span>
+    <div class="uisel" id="uiSwitch"></div>
+  </div>
+
+  <!-- ══ START ══ -->
+  <div class="panel" id="setupPanel">
+    <div class="field">
+      <label for="title" data-i18n="titleLabel">Session title</label>
+      <input id="title" data-i18n-ph="titlePh" placeholder="Sunday Service" />
+    </div>
+    <div class="field">
+      <label data-i18n="targetsLabel">Translate into (up to 3 — fewer is faster and cheaper)</label>
+      <div class="langpick" id="langpick"></div>
+      <div class="hint" id="langHint"></div>
+    </div>
+    <div class="row">
+      <button class="primary big-start" id="startBtn" data-i18n="start">▶ Start</button>
+      <span class="sub" id="setupMsg"></span>
+    </div>
+    <div class="hint" id="readyHint" style="margin-top:10px"></div>
+  </div>
+
+  <!-- ══ AUDIENCE ══ -->
+  <div class="panel" id="joinPanel">
+    <h2 data-i18n="audienceHead">Audience scans this</h2>
+    <div class="joinbox">
+      <div class="qr" id="qr"></div>
+      <div>
+        <input class="code codeinput" id="code" maxlength="12" spellcheck="false"
+               autocapitalize="characters" autocomplete="off" aria-label="Session code" />
+        <div class="hint" id="codeMsg" data-i18n="codeHint">Editable — reuse the same code so a saved link keeps working.</div>
+        <div class="sub" id="joinUrl" style="margin:6px 0 10px;word-break:break-all"></div>
+        <div class="row">
+          <button id="copyBtn" data-i18n="copyLink">Copy link</button>
+          <button id="openBtn" data-i18n="preview">Preview audience view</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ LIVE ══ -->
+  <div class="panel" id="livePanel" style="display:none">
+    <div class="meter"><i id="meterBar"></i></div>
+    <div class="row" style="margin-bottom:6px">
+      <button class="danger" id="stopBtn" data-i18n="stop">■ Stop</button>
+      <button id="newBtn" style="display:none" data-i18n="newSession">↻ New session</button>
+      <button id="dlBtn" data-i18n="download">Download recording</button>
+      <button id="settingsBtn" data-i18n="settings">⚙ Settings</button>
+      <span class="sub" id="statMsg"></span>
+    </div>
+    <div class="row" style="margin:2px 0 8px"><div class="langsel" id="previewLang"></div></div>
+    <div class="draft" id="draft">…</div>
+    <div class="err" id="err"></div>
+    <hr style="border:none;border-top:1px solid var(--line);margin:14px 0" />
+    <div class="lines" id="lines"></div>
+  </div>
+
+  <!-- ══ ADVANCED ══ -->
+  <details class="panel adv" id="advPanel">
+    <summary data-i18n="advanced">Advanced — glossary, context, source language, keys</summary>
+
+    <div class="field" style="margin-top:14px">
+      <label for="glossary" data-i18n="glossaryLabel">Glossary — the single biggest accuracy lever</label>
+      <textarea id="glossary" data-i18n-ph="glossaryPh"></textarea>
+      <div class="hint" data-i18n="glossaryHint">Names, places, scripture books, jargon.</div>
+    </div>
+
+    <div class="grid two">
+      <div class="field">
+        <label for="lang" data-i18n="srcLangLabel">Source language</label>
+        <select id="lang">
+          <option value="auto" data-i18n="srcAuto">Auto-detect (mixed EN/Chinese)</option>
+          <option value="en" data-i18n="srcEn">English</option>
+          <option value="zh" data-i18n="srcZh">Chinese</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="context" data-i18n="contextLabel">Session context (for the AI)</label>
+        <textarea id="context" style="min-height:52px" data-i18n-ph="contextPh"></textarea>
+      </div>
+    </div>
+
+    <h2 style="margin-top:8px" data-i18n="keysHead">API key</h2>
+    <div class="field">
+      <label for="groqKey" data-i18n="groqLabel">Groq — powers both recognition and translation</label>
+      <input id="groqKey" type="password" autocomplete="off" placeholder="gsk_…" />
+      <div class="hint" data-i18n="groqHint">This one key is enough.</div>
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <button id="testBtn" data-i18n="testKey">Test key</button>
+      <span class="sub" id="keyMsg"></span>
+    </div>
+    <details class="sub" style="margin-top:4px">
+      <summary style="cursor:pointer;padding:6px 0" data-i18n="backupKeys">Backup keys (rarely needed)</summary>
+      <div class="grid two" style="margin-top:10px">
+        <div class="field"><label for="geminiKey">Gemini</label>
+          <input id="geminiKey" type="password" autocomplete="off" /></div>
+        <div class="field"><label for="kimiKey">Kimi</label>
+          <input id="kimiKey" type="password" autocomplete="off" /></div>
+        <div class="field"><label for="glmKey">GLM</label>
+          <input id="glmKey" type="password" autocomplete="off" /></div>
+      </div>
+    </details>
+  </details>
+
+</div>
+
+<script src="/config.js"></script>
+<script type="module" src="/presenter.js"></script>
+</body>
+</html>

@@ -1,0 +1,308 @@
+import { LiveEngine, LANGS } from "./engine.js";
+import { t, applyI18n, mountUiSwitch } from "./i18n.js";
+import { createPublisher } from "./channel.js";
+
+const $ = (id) => document.getElementById(id);
+const LS = {
+  get: (k, d = "") => { try { return localStorage.getItem("live." + k) ?? d; } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem("live." + k, v); } catch {} },
+};
+
+/* ── session identity ── */
+const CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";      // no I/O/0/1 — read aloud safely
+const rand = (n) => Array.from({ length: n }, () => CHARS[Math.floor(Math.random() * CHARS.length)]).join("");
+
+let session = LS.get("session") || rand(6);
+let token = LS.get("token") || (rand(8) + rand(8));
+LS.set("session", session); LS.set("token", token);
+
+let qrcodeLib = null;
+const joinUrlFor = (c) => `${location.origin}/join/${c}`;
+
+async function paintSession() {
+  $("code").value = session;
+  $("joinUrl").textContent = joinUrlFor(session);
+  // QR is a nicety, not a dependency — if the CDN is blocked we still show the link.
+  try {
+    if (!qrcodeLib) qrcodeLib = (await import("https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/+esm")).default;
+    const qr = qrcodeLib(0, "M");
+    qr.addData(joinUrlFor(session));
+    qr.make();
+    $("qr").innerHTML = qr.createImgTag(4, 8);
+  } catch { $("qr").style.display = "none"; }
+}
+paintSession();
+
+/**
+ * The code is editable so a congregation can keep ONE permanent link
+ * (e.g. /join/SUNDAY). Publishing claims it with this device's token; another
+ * device holding a different token gets 409 and we say so plainly.
+ */
+$("code").addEventListener("change", async () => {
+  const next = ($("code").value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (engine && doc.live) { $("code").value = session; $("codeMsg").textContent = t("codeLocked"); return; }
+  if (!/^[A-Z0-9]{4,12}$/.test(next)) { $("code").value = session; $("codeMsg").textContent = t("codeInvalid"); return; }
+  if (next === session) return;
+  session = next;
+  LS.set("session", session);
+  publisher = createPublisher({ session, token });
+  await paintSession();
+  $("codeMsg").textContent = t("codeSaved");
+});
+
+$("copyBtn").onclick = async () => {
+  try { await navigator.clipboard.writeText(joinUrl); $("copyBtn").textContent = t("copied"); }
+  catch { $("copyBtn").textContent = t("copyManual"); }
+  setTimeout(() => ($("copyBtn").textContent = t("copyLink")), 1600);
+};
+$("openBtn").onclick = () => window.open(`./view.html?s=${session}`, "_blank");
+
+/* ── settings: config.js defaults → localStorage overrides → live edits ── */
+const CFG = window.SPARK_LIVE_CONFIG || {};
+for (const id of ["title", "context", "glossary", "groqKey", "geminiKey", "kimiKey", "glmKey", "lang"]) {
+  const el = $(id);
+  const saved = LS.get(id);
+  const preset = CFG[id] ?? CFG.defaults?.[id] ?? "";
+  el.value = saved || preset || el.value;
+  el.addEventListener("change", () => LS.set(id, el.value));
+  el.addEventListener("blur", () => LS.set(id, el.value));
+}
+
+// Tell the operator what's ready without making them open anything.
+function readiness() {
+  const have = ["groqKey", "geminiKey", "kimiKey", "glmKey"].filter((k) => $(k).value.trim());
+  const names = { groqKey: "Groq", geminiKey: "Gemini", kimiKey: "Kimi", glmKey: "GLM" };
+  const hint = $("readyHint");
+  if (!$("groqKey").value.trim()) {
+    hint.textContent = t("needGroq");
+    $("advPanel").open = true;
+  } else {
+    hint.textContent = t("ready", have.map((k) => names[k]).join(" → "));
+  }
+}
+readiness();
+
+/* ── target languages ── */
+const DEFAULT_TARGETS = ["prs", "en"];
+let targets = (() => {
+  try { const v = JSON.parse(LS.get("targets") || "null"); if (Array.isArray(v) && v.length) return v.slice(0, 3); } catch {}
+  return DEFAULT_TARGETS.slice();
+})();
+function renderLangPick() {
+  $("langpick").innerHTML = Object.entries(LANGS)
+    .map(([c, d]) => `<button data-c="${c}" class="${targets.includes(c) ? "on" : ""}">${d.label}</button>`).join("");
+  for (const b of $("langpick").querySelectorAll("button")) {
+    b.onclick = () => {
+      const c = b.dataset.c;
+      if (targets.includes(c)) targets = targets.filter((x) => x !== c);
+      else if (targets.length < 3) targets.push(c);
+      else { $("langHint").textContent = t("maxLangs"); return; }
+      if (!targets.length) targets = ["prs"];
+      LS.set("targets", JSON.stringify(targets));
+      renderLangPick(); renderPreviewLang();
+      // Mid-session edits apply to NEW lines; already-translated lines keep what
+      // they have (re-translating history would be a surprise cost).
+      if (engine) {
+        engine.cfg.targets = targets.slice();
+        doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
+        renderLines(); schedulePush();
+      }
+    };
+  }
+  const names = targets.map((c) => LANGS[c].en).join(" · ");
+  $("langHint").textContent = targets.length >= 3 ? t("langWarn", names) : t("langNote", names);
+}
+mountUiSwitch($("uiSwitch"));
+applyI18n();
+renderLangPick();
+
+/* Which target language the OPERATOR sees in their own console. */
+let previewLang = LS.get("previewLang") || "";
+function activePreview() {
+  return targets.includes(previewLang) ? previewLang : targets[0];
+}
+function renderPreviewLang() {
+  const el = $("previewLang");
+  if (!el) return;
+  const cur = activePreview();
+  el.style.display = targets.length > 1 ? "" : "none";
+  el.innerHTML = targets.map((c) =>
+    `<button class="iconbtn lang ${c === cur ? "on" : ""}" data-c="${c}"${LANGS[c].rtl ? ' lang="prs"' : ""}>${LANGS[c].label}</button>`).join("");
+  for (const b of el.querySelectorAll(".lang")) b.onclick = () => {
+    previewLang = b.dataset.c; LS.set("previewLang", previewLang);
+    renderPreviewLang(); renderLines(); renderDraft();
+  };
+}
+window.addEventListener("ui:lang", () => {
+  applyI18n(); renderLangPick(); renderPreviewLang(); readiness();
+  $("copyBtn").textContent = t("copyLink");
+  if (doc.lines.length) renderLines();
+});
+
+/* ── state ── */
+const doc = {
+  v: 0, title: "", live: false, ended: false, draft: "", interim: "",
+  langs: [], startedAt: Date.now(), lines: [],
+};
+let publisher = createPublisher({ session, token });
+let engine = null;
+let pushTimer = null;
+
+function schedulePush() {
+  if (pushTimer) return;
+  // Batch rapid updates into ~400 ms so a burst of corrections is one request.
+  pushTimer = setTimeout(async () => {
+    pushTimer = null;
+    doc.v += 1;
+    try { await publisher.push(doc); }
+    catch (e) { showErr(t("publishFail") + e.message); }
+  }, 400);
+}
+
+const showErr = (m) => { $("err").textContent = m || ""; };
+
+function renderDraft() {
+  const primary = activePreview();
+  const rtl = (LANGS[primary] || {}).rtl;
+  $("draft").innerHTML = doc.interim
+    ? `<div class="${rtl ? "rtl" : ""}" style="color:var(--warn)">${esc(doc.interim)}</div>
+       <div style="opacity:.6;margin-top:2px">${esc(doc.draft)}</div>`
+    : esc(doc.draft) || "…";
+}
+function renderLines() {
+  const primary = activePreview();
+  const rtl = (LANGS[primary] || {}).rtl;
+  $("lines").innerHTML = doc.lines.slice(-25).reverse().map((l) => {
+    const main = (l.tr && l.tr[primary]) || "";
+    return `<div class="line ${l.pending ? "pending" : ""} ${l.failed ? "failed" : ""}">
+      <div class="dari ${rtl ? "rtl" : ""}">${esc(main) || (l.pending ? t("translating") : "—")}</div>
+      <div class="src">${esc(l.src)}</div>
+    </div>`;
+  }).join("");
+}
+const esc = (s) => String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/* ── key test ── */
+$("testBtn").onclick = async () => {
+  // Result goes NEXT TO THE BUTTON. It used to write to #setupMsg up beside the
+  // Start button, so from inside the collapsed Advanced panel it looked dead.
+  const msg = $("keyMsg");
+  const btn = $("testBtn");
+  btn.disabled = true;
+  msg.textContent = t("testing");
+
+  const probes = [
+    ["groqKey",   "Groq",   (k) => fetch("https://api.groq.com/openai/v1/models", { headers: { Authorization: `Bearer ${k}` } })],
+    ["geminiKey", "Gemini", (k) => fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(k)}`)],
+    ["kimiKey",   "Kimi",   (k) => fetch("https://api.moonshot.ai/v1/models", { headers: { Authorization: `Bearer ${k}` } })],
+    ["glmKey",    "GLM",    (k) => fetch("https://api.z.ai/api/coding/paas/v4/models", { headers: { Authorization: `Bearer ${k}` } })],
+  ];
+
+  const out = [];
+  for (const [id, label, run] of probes) {
+    const key = $(id).value.trim();
+    if (!key) { if (id === "groqKey") out.push(`${label} —`); continue; }
+    try {
+      const r = await run(key);
+      out.push(`${label} ${r.ok ? "✓" : "✗" + r.status}`);
+    } catch {
+      // A browser-side failure here is almost always CORS, not a bad key.
+      out.push(`${label} ✗net`);
+    }
+  }
+  msg.textContent = out.join("  ·  ");
+  btn.disabled = false;
+};
+
+/* ── start / stop ── */
+$("startBtn").onclick = async () => {
+  const groqKey = $("groqKey").value.trim();
+  if (!groqKey) { $("setupMsg").textContent = t("noGroq"); return; }
+
+  // Fast-and-good first, reliable-but-slow last. Only configured keys join.
+  const llmChain = [
+    { id: "groq",   key: groqKey },
+    { id: "gemini", key: $("geminiKey").value.trim() },
+    { id: "kimi",   key: $("kimiKey").value.trim() },
+    { id: "glm",    key: $("glmKey").value.trim() },
+  ].filter((s) => s.key);
+
+  engine = new LiveEngine({
+    groqKey, llmChain, targets,
+    language: $("lang").value,
+    glossary: $("glossary").value.trim(),
+    context: $("context").value.trim(),
+  }).events({
+    level: (v) => { $("meterBar").style.width = Math.round(v * 100) + "%"; },
+    draft: (t) => { doc.draft = t || ""; renderDraft(); schedulePush(); },
+    interim: (t) => { doc.interim = t || ""; renderDraft(); schedulePush(); },
+    error: (e) => showErr(String(e && e.message ? e.message : e)),
+    line: (l) => {
+      const i = doc.lines.findIndex((x) => x.id === l.id);
+      if (i >= 0) doc.lines[i] = l; else doc.lines.push(l);
+      if (doc.lines.length > 120) doc.lines.splice(0, doc.lines.length - 120);
+      renderLines();
+      schedulePush();
+    },
+  });
+
+  try {
+    await engine.start();
+  } catch (e) {
+    $("setupMsg").textContent = t("cantStart") + (e.message === "missing_asr_key" ? t("noGroq") : e.message);
+    return;
+  }
+
+  doc.title = $("title").value.trim() || "Spark Live";
+  doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
+  doc.live = true; doc.ended = false; doc.startedAt = Date.now();
+  schedulePush();
+
+  renderPreviewLang();
+  $("setupPanel").style.display = "none";
+  $("livePanel").style.display = "";
+  $("dot").className = "dot on";
+  $("statePill").textContent = t("stateLive");
+  showErr("");
+};
+
+$("stopBtn").onclick = async () => {
+  if (!engine) return;
+  $("statMsg").textContent = t("wrapUp");
+  engine.stop();
+  await engine.drain();
+  doc.live = false; doc.ended = true; doc.draft = "";
+  doc.v += 1;
+  try { await publisher.push(doc); } catch {}
+  $("dot").className = "dot";
+  $("statePill").textContent = t("stateEnded");
+  $("statMsg").textContent = t("endedMsg");
+  $("stopBtn").style.display = "none";
+  $("newBtn").style.display = "";
+};
+
+/* Start a brand-new session: fresh code so old audience links don't collide. */
+$("newBtn").onclick = () => {
+  engine = null;
+  session = rand(6); token = rand(8) + rand(8);   // fresh code + fresh claim
+  LS.set("session", session); LS.set("token", token);
+  location.reload();
+};
+$("settingsBtn").onclick = () => {
+  $("advPanel").open = true;
+  $("advPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+};
+
+$("dlBtn").onclick = () => {
+  if (!engine) return;
+  const blob = engine.archiveWav();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(doc.title || "spark-live").replace(/[^\w一-龥-]+/g, "_")}.wav`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+};
+
+window.addEventListener("beforeunload", (e) => {
+  if (engine && doc.live) { e.preventDefault(); e.returnValue = ""; }
+});
