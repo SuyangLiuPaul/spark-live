@@ -102,6 +102,18 @@ class Capture {
       this.node.onaudioprocess = (e) =>
         this.onChunk(new Float32Array(e.inputBuffer.getChannelData(0)), this.ctx.sampleRate);
     }
+    // iOS suspends the AudioContext whenever Safari goes to the background —
+    // an app switch, an incoming call, a notification tapped. Nothing resumed it
+    // afterwards, so capture stayed dead until the session was restarted. Retake
+    // it on every return to the foreground, and whenever the context says it
+    // changed state, so an iPad or iPhone recovers on its own.
+    this._wake = () => {
+      if (!this.ctx || this.ctx.state !== "suspended") return;
+      this.ctx.resume().catch(() => {});
+    };
+    document.addEventListener("visibilitychange", this._wake);
+    this.ctx.addEventListener?.("statechange", this._wake);
+
     this.src.connect(this.node);
     // Worklets need a sink to be pulled; a muted gain keeps it silent.
     const mute = this.ctx.createGain();
@@ -112,6 +124,13 @@ class Capture {
   }
 
   stop() {
+    // Detach the foreground listener too, or a stopped session keeps a closed
+    // context alive through the document and leaks on every restart.
+    if (this._wake) {
+      document.removeEventListener("visibilitychange", this._wake);
+      try { this.ctx?.removeEventListener?.("statechange", this._wake); } catch {}
+      this._wake = null;
+    }
     try { this.node && this.node.disconnect(); } catch {}
     try { this.src && this.src.disconnect(); } catch {}
     try { this.stream && this.stream.getTracks().forEach((t) => t.stop()); } catch {}
@@ -601,6 +620,10 @@ export class LiveEngine {
    */
   _watchdog() {
     if (!this.running || this.stallWarned) return;
+    // A hidden page has its audio suspended by the OS on purpose — that's not a
+    // broken microphone, and warning about it would cry wolf every time the
+    // presenter glances at another app. Only judge a stall while visible.
+    if (document.visibilityState !== "visible") { this.lastAudioAt = Date.now(); return; }
     if (Date.now() - this.lastAudioAt < 5000) return;
     this.stallWarned = true;
     this.on.status({ running: true, stalled: true });
