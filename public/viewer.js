@@ -41,9 +41,32 @@ function renderLangSel() {
 }
 function apply() {
   document.documentElement.style.setProperty("--dsize", pref.size + "px");
-  $("srcBtn").style.opacity = pref.src ? "1" : ".45";
+  // A checkbox menu item states its own status; opacity did not.
+  $("srcBtn").setAttribute("aria-checked", pref.src ? "true" : "false");
+  $("sizeVal").textContent = pref.size;
   renderLangSel();
 }
+
+/* ── display menu ─────────────────────────────────────────────────────
+   Opened rarely, so it must be obvious and dismissible: Escape, a click
+   outside, or choosing an action all close it, and focus returns to the
+   button so a keyboard user is not stranded. */
+const menu = $("menu");
+const menuBtn = $("menuBtn");
+function setMenu(open) {
+  menu.hidden = !open;
+  menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (!open) return;
+  const first = menu.querySelector("button:not([disabled])");
+  first && first.focus();
+}
+menuBtn.onclick = (e) => { e.stopPropagation(); setMenu(menu.hidden); };
+document.addEventListener("click", (e) => {
+  if (!menu.hidden && !menu.contains(e.target) && e.target !== menuBtn) setMenu(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !menu.hidden) { setMenu(false); menuBtn.focus(); }
+});
 $("bigger").onclick = () => { pref.size = Math.min(72, pref.size + 4); };
 $("smaller").onclick = () => { pref.size = Math.max(16, pref.size - 4); };
 $("srcBtn").onclick = () => { pref.src = !pref.src; };
@@ -51,7 +74,13 @@ $("fsBtn").onclick = () => {
   const el = document.documentElement;
   if (document.fullscreenElement) document.exitFullscreen();
   else (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el);
+  setMenu(false);
 };
+// iOS Safari has no Fullscreen API on iPhone; offering a dead control is worse
+// than not offering one.
+if (!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen)) {
+  $("fsBtn").hidden = true;
+}
 mountUiSwitch($("uiSwitch"));
 applyI18n();
 apply();

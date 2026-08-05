@@ -22,22 +22,44 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&display=swap" />
-<link rel="stylesheet" href="/styles.css?v=14" />
+<link rel="stylesheet" href="/styles.css?v=15" />
 </head>
 <body>
 <div class="stage">
 
+  <!-- An audience member does exactly one thing often: choose the language they
+       read. That stays in the bar; everything else is set once, so it moves into
+       a labelled menu instead of competing for space and attention. -->
   <div class="stagebar">
     <span class="dot" id="dot"></span>
     <strong id="title" class="big">Spark Live</strong>
-    <div class="spacer"></div>
-    <div class="langsel" id="langsel"></div>
-    <div class="uisel" id="uiSwitch"></div>
-    <button class="iconbtn" id="srcBtn" data-i18n="srcBtn">Source</button>
-    <button class="iconbtn" id="smaller" aria-label="Smaller text">A−</button>
-    <button class="iconbtn" id="bigger" aria-label="Larger text">A+</button>
-    
-    <button class="iconbtn" id="fsBtn">⛶</button>
+    <div class="langsel" id="langsel" role="group" aria-label="Reading language"></div>
+    <div class="menuwrap">
+      <button class="iconbtn menubtn" id="menuBtn" aria-haspopup="true"
+              aria-expanded="false" aria-controls="menu" data-i18n-al="menuLabel"
+              aria-label="Display options">⋯</button>
+      <div class="menu" id="menu" role="menu" hidden>
+        <button class="menuitem" role="menuitemcheckbox" id="srcBtn" aria-checked="true">
+          <span data-i18n="menuSource">Show original text</span>
+          <span class="tick" aria-hidden="true">✓</span>
+        </button>
+        <div class="menuitem static">
+          <span data-i18n="menuTextSize">Text size</span>
+          <span class="sizectl">
+            <button id="smaller" data-i18n-al="smallerLabel" aria-label="Smaller text">A−</button>
+            <b id="sizeVal">32</b>
+            <button id="bigger" data-i18n-al="biggerLabel" aria-label="Larger text">A+</button>
+          </span>
+        </div>
+        <div class="menuitem static">
+          <span data-i18n="menuInterface">App language</span>
+          <div class="uisel" id="uiSwitch"></div>
+        </div>
+        <button class="menuitem" role="menuitem" id="fsBtn">
+          <span data-i18n="menuFullscreen">Full screen</span>
+        </button>
+      </div>
+    </div>
   </div>
 
   <div class="feed" id="feed">

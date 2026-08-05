@@ -56,6 +56,12 @@ const DICT = {
     checkCode: "Check the code",
     missingCode: "Missing session code",
     readyHosted: "Ready — no setup needed. Press Start and allow the microphone.",
+    menuLabel: "Display options",
+    menuSource: "Show original text",
+    menuTextSize: "Text size",
+    menuInterface: "App language",
+    menuFullscreen: "Full screen",
+    smallerLabel: "Smaller text", biggerLabel: "Larger text",
     micLabel: "Microphone",
     micDefault: "System default",
     micNumbered: (n) => `Microphone ${n}`,
@@ -122,6 +128,12 @@ const DICT = {
     checkCode: "کد را بررسی کنید",
     missingCode: "کد جلسه موجود نیست",
     readyHosted: "آماده — نیازی به تنظیم نیست. شروع را بزنید و به مایکروفون اجازه دهید.",
+    menuLabel: "تنظیمات نمایش",
+    menuSource: "نمایش متن اصلی",
+    menuTextSize: "اندازهٔ متن",
+    menuInterface: "زبان برنامه",
+    menuFullscreen: "تمام‌صفحه",
+    smallerLabel: "متن کوچک‌تر", biggerLabel: "متن بزرگ‌تر",
     micLabel: "مایکروفون",
     micDefault: "پیش‌فرض سیستم",
     micNumbered: (n) => `مایکروفون ${n}`,
@@ -188,6 +200,12 @@ const DICT = {
     checkCode: "請確認代碼",
     missingCode: "缺少場次代碼",
     readyHosted: "已就緒 — 免設定。按開始並允許麥克風權限即可。",
+    menuLabel: "顯示選項",
+    menuSource: "顯示原文",
+    menuTextSize: "文字大小",
+    menuInterface: "介面語言",
+    menuFullscreen: "全螢幕",
+    smallerLabel: "縮小文字", biggerLabel: "放大文字",
     micLabel: "麥克風",
     micDefault: "系統預設",
     micNumbered: (n) => `麥克風 ${n}`,
@@ -242,6 +260,8 @@ export function t(key, ...args) {
 export function applyI18n(root = document) {
   for (const el of root.querySelectorAll("[data-i18n]")) el.textContent = t(el.dataset.i18n);
   for (const el of root.querySelectorAll("[data-i18n-ph]")) el.placeholder = t(el.dataset.i18nPh);
+  // Screen-reader labels are UI text too — they were being left in English.
+  for (const el of root.querySelectorAll("[data-i18n-al]")) el.setAttribute("aria-label", t(el.dataset.i18nAl));
   document.documentElement.lang = cur === "zh" ? "zh-Hant" : cur === "prs" ? "prs" : "en";
   // The offline banner is drawn by CSS from this attribute, so it has to be
   // refreshed whenever the interface language changes.
