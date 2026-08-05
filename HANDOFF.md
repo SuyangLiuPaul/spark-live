@@ -240,9 +240,35 @@ with window size. Typical windows are 4-8 s, so budget **~0.5 s**. A presenter
 who enters their own key in Settings goes direct and gets that back — worth
 knowing for a latency-sensitive room.
 
+### Rotation under real throttling — measured, not simulated
+A burst against 2 of the 8 keys produced a genuine Groq 429
+(`retry-after: 24`, `limit-tokens 8000`, `remaining 1`). Hosted-site latency
+through the switchover:
+
+| | requests | p50 |
+|---|---|---|
+| before | 8/8 ok | 0.72 s |
+| **during (2 keys throttled)** | **8/8 ok** | **0.75 s** |
+| after | 8/8 ok | 0.69 s |
+
+Seamless: +0.03 s and no failures, because the server-side cooldown map skips a
+benched key without trying it. 12 concurrent calls during throttling also all
+returned 200.
+
+### Three venues on one pool (`tools/venues.py`)
+5 min, 3 simultaneous sessions at full cadence: **360 ASR + 99 chat, zero 429,
+zero errors.** Per-venue ASR p50 1.27-1.37 s, p95 ≤2.72 s — no worse than a
+single venue. Combined draw is one ASR every 0.84 s.
+
+At that rate the shared pool sustains **~3.7 h (223 min) of three-venue
+simultaneous use**, i.e. comfortably one service everywhere at once, but not
+three back-to-back long services in a single day.
+
 ### Theoretical ceiling (8 keys)
-ASR is the binding bucket: 16,000 requests at one per 2.2 s = **9.8 h** of
-continuous speech; ~12 h with 20% silence skipped, ~14 h with 30%. Translate
+ASR is the binding bucket: 16,000 requests at one per 2.2 s = **9.8 h** (588 min)
+of continuous speech. Measured consumption is slower than the nominal tick — a
+60-min soak drew one ASR every 2.65 s, giving **~11.8 h (708 min)** — because a
+pass cannot start until the previous one returns. Add silence skipping on top; ~12 h with 20% silence skipped, ~14 h with 30%. Translate
 is 13.3 h, interim 80 h. Past exhaustion it degrades rather than stops — the
 daily cap refills continuously, so the pool sustains one ASR pass every 5.4 s
 instead of 2.2 s. These are **daily** totals, shared across services.
