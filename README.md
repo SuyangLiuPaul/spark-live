@@ -116,6 +116,14 @@ provider itself.
 - **Groq** — required. Powers both speech recognition and translation.
 - Gemini / Kimi / GLM — optional fallbacks, used only if the primary is rate-limited.
 
+**For a long talk, add more than one Groq key.** Groq's free tier meters speech
+recognition in **requests per day, per key** (2,000), and the stabiliser spends one
+roughly every 2.2 seconds — so a multi-hour service needs more than one key's
+budget. Paste extras into *Advanced → Backup keys → More Groq keys*, one per line.
+They are **round-robined**, so every key stays comfortably inside its own quota
+instead of one being driven into a `429`; any key that does get throttled is
+benched for its `retry-after` and skipped until it recovers.
+
 > For an unattended kiosk you can drop a `public/config.js` defining
 > `window.SPARK_LIVE_CONFIG = { groqKey: "…" }` to pre-fill the fields.
 > **That file is gitignored and would be publicly readable on a deployed site** —

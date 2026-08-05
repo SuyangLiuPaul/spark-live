@@ -118,6 +118,14 @@ function resampleTo16k(input, rate) {
   return out;
 }
 
+function rmsOf(pcm) {
+  if (!pcm.length) return 0;
+  let sum = 0;
+  // Stride: at 16 kHz every 4th sample is ample for a speech/silence decision.
+  for (let i = 0; i < pcm.length; i += 4) sum += pcm[i] * pcm[i];
+  return Math.sqrt(sum / Math.ceil(pcm.length / 4));
+}
+
 function encodeWav(samples, rate = 16000) {
   const buf = new ArrayBuffer(44 + samples.length * 2);
   const dv = new DataView(buf);
@@ -163,9 +171,61 @@ class Agreement {
   pendingText() { return this.prev.map((w) => w.w).join(" ").replace(/\s+([,.!?，。！？])/g, "$1").trim(); }
 }
 
+/* ────────────────────────── key pool ────────────────────────── */
+
+/**
+ * Groq rate-limits PER KEY (~8k tokens/min for chat, ~7200 audio-sec/hr for
+ * whisper), so N keys give N× headroom. We round-robin rather than
+ * use-until-throttled: spreading calls evenly keeps every key comfortably
+ * under its own budget instead of repeatedly slamming one into a 429.
+ * A key that does 429 is benched briefly and the rotation skips it.
+ */
+export class KeyPool {
+  constructor(keys) {
+    this.keys = (Array.isArray(keys) ? keys : [keys]).map((k) => String(k || "").trim()).filter(Boolean);
+    this.cool = new Map();
+    this.i = 0;
+  }
+  get size() { return this.keys.length; }
+  /** Next usable key, skipping any that are cooling down. */
+  next() {
+    if (!this.keys.length) return "";
+    const now = Date.now();
+    for (let n = 0; n < this.keys.length; n++) {
+      const idx = (this.i + n) % this.keys.length;
+      const k = this.keys[idx];
+      if ((this.cool.get(k) || 0) <= now) { this.i = (idx + 1) % this.keys.length; return k; }
+    }
+    // Everything is benched — return the one that frees up soonest.
+    return this.keys.reduce((a, b) => ((this.cool.get(a) || 0) <= (this.cool.get(b) || 0) ? a : b));
+  }
+  /** Bench a key after a 429. `retryAfter` is seconds, when the API tells us. */
+  bench(key, retryAfter) {
+    const ms = Math.min(120000, Math.max(5000, (Number(retryAfter) || 30) * 1000));
+    this.cool.set(key, Date.now() + ms);
+  }
+  healthy() { const now = Date.now(); return this.keys.filter((k) => (this.cool.get(k) || 0) <= now).length; }
+}
+
 /* ─────────────────────────── ASR ─────────────────────────── */
 
-async function transcribeGroq({ blob, key, model, language, signal }) {
+async function transcribeGroq({ blob, pool, model, language, signal }) {
+  let lastErr = null;
+  // One attempt per key: a 429 on this key just means try the next one.
+  for (let attempt = 0; attempt < Math.max(1, pool.size); attempt++) {
+    const key = pool.next();
+    try {
+      return await transcribeOnce({ blob, key, model, language, signal });
+    } catch (e) {
+      lastErr = e;
+      if (e && e.status === 429) { pool.bench(key, e.retryAfter); continue; }
+      throw e;
+    }
+  }
+  throw lastErr || new Error("ASR: all keys rate-limited");
+}
+
+async function transcribeOnce({ blob, key, model, language, signal }) {
   const fd = new FormData();
   fd.append("file", blob, "chunk.wav");
   fd.append("model", model || "whisper-large-v3-turbo");
@@ -182,7 +242,10 @@ async function transcribeGroq({ blob, key, model, language, signal }) {
   });
   if (!res.ok) {
     const t = await res.text().catch(() => "");
-    throw new Error(`ASR ${res.status}: ${t.slice(0, 200)}`);
+    const err = new Error(`ASR ${res.status}: ${t.slice(0, 160)}`);
+    err.status = res.status;
+    err.retryAfter = res.headers.get("retry-after");
+    throw err;
   }
   const data = await res.json();
 
@@ -300,7 +363,11 @@ async function askOpenAICompat({ key, base, model, prompt, sys, signal }) {
       messages: [{ role: "system", content: sys }, { role: "user", content: prompt }],
     }),
   });
-  if (!res.ok) throw new Error(`${res.status}: ${(await res.text().catch(() => "")).slice(0, 160)}`);
+  if (!res.ok) {
+    const err = new Error(`${res.status}: ${(await res.text().catch(() => "")).slice(0, 160)}`);
+    err.status = res.status; err.retryAfter = res.headers.get("retry-after");
+    throw err;
+  }
   const data = await res.json();
   return data?.choices?.[0]?.message?.content || "";
 }
@@ -329,15 +396,22 @@ async function askChain(chain, prompt, sys) {
   const errors = [];
   for (const step of chain) {
     const def = LLM_PROVIDERS[step.id];
-    if (!def || !step.key) continue;
-    try {
-      const raw = def.kind === "gemini"
-        ? await askGemini({ key: step.key, model: step.model || def.model, prompt, sys })
-        : await askOpenAICompat({ key: step.key, base: step.base || def.base, model: step.model || def.model, prompt, sys });
-      if (raw && raw.trim()) return { raw, via: step.id };
-      errors.push(`${step.id}: empty`);
-    } catch (e) {
-      errors.push(`${step.id}: ${e.message}`);
+    if (!def || !(step.key || (step.pool && step.pool.size))) continue;
+    const tries = step.pool ? Math.max(1, step.pool.size) : 1;
+    for (let a = 0; a < tries; a++) {
+      const key = step.pool ? step.pool.next() : step.key;
+      try {
+        const raw = def.kind === "gemini"
+          ? await askGemini({ key, model: step.model || def.model, prompt, sys })
+          : await askOpenAICompat({ key, base: step.base || def.base, model: step.model || def.model, prompt, sys });
+        if (raw && raw.trim()) return { raw, via: step.id };
+        errors.push(`${step.id}: empty`);
+        break;
+      } catch (e) {
+        errors.push(`${step.id}: ${e.message}`);
+        if (e && e.status === 429 && step.pool) { step.pool.bench(key, e.retryAfter); continue; }
+        break;
+      }
     }
   }
   throw new Error(errors.join(" · ") || "no_provider_configured");
@@ -359,8 +433,8 @@ export class LiveEngine {
       // large-v3 over turbo: measured on real sermon audio it fixed a homophone
       // (當日→當然), avoided a garbled run, and ADDS PUNCTUATION (which the
       // sentence splitter below depends on) for ~0.1 s more on a 25 s window.
-      groqKey: "", groqModel: "whisper-large-v3", language: "auto",
-      llmChain: [],            // ordered [{id, key, model?, base?}]
+      groqKey: "", groqKeys: [], groqModel: "whisper-large-v3", language: "auto",
+      llmChain: [],            // ordered [{id, key, model?, base?}]; groq steps get the pool
       targets: ["prs"],        // audience languages, first = primary
       interim: true,           // cheap provisional translation of the live tail
       glossary: "", context: "",
@@ -388,7 +462,15 @@ export class LiveEngine {
 
   async start() {
     if (this.running) return;
-    if (!this.cfg.groqKey) throw new Error("missing_asr_key");
+    const groqKeys = (this.cfg.groqKeys && this.cfg.groqKeys.length) ? this.cfg.groqKeys : [this.cfg.groqKey];
+    // Two pools over the same keys: Groq meters speech and chat separately, so a
+    // chat 429 must not bench a key that still has audio budget (and vice versa).
+    this.pool = new KeyPool(groqKeys);
+    const chatPool = new KeyPool(groqKeys);
+    for (const step of this.cfg.llmChain || []) {
+      if ((step.id === "groq" || step.id === "groqHi") && !step.pool && chatPool.size) step.pool = chatPool;
+    }
+    if (!this.pool.size) throw new Error("missing_asr_key");
     if (!this.cfg.llmChain || !this.cfg.llmChain.length) throw new Error("missing_llm_key");
 
     this.cap = new Capture((chunk, rate) => this._audio(chunk, rate));
@@ -420,6 +502,7 @@ export class LiveEngine {
     if (rms > SILENCE_RMS) this.lastVoiceAt = Date.now();
   }
 
+  /** Whole-buffer loudness — decides whether a window is worth transcribing. */
   _flat() {
     const out = new Float32Array(this.bufLen);
     let o = 0;
@@ -442,11 +525,23 @@ export class LiveEngine {
     const seconds = this.bufLen / 16000;
     if (seconds < MIN_WINDOW_S) return;
 
+    // Groq meters speech recognition in requests PER DAY, so a pass over pure
+    // silence is not just latency — it permanently spends budget. If the whole
+    // buffer is below the voice floor and the stabiliser has nothing pending,
+    // there is no text to recover: drop the silence and skip the call.
+    const pcm = this._flat();
+    if (!this.agree.pendingText() && rmsOf(pcm) < SILENCE_RMS) {
+      this._trim(seconds - MIN_WINDOW_S / 2);
+      this.skipped = (this.skipped || 0) + 1;
+      return;
+    }
+
     this.busy = true;
     try {
-      const wav = encodeWav(this._flat(), 16000);
+      const wav = encodeWav(pcm, 16000);
+      this.asrCalls = (this.asrCalls || 0) + 1;
       const { words } = await transcribeGroq({
-        blob: wav, key: this.cfg.groqKey, model: this.cfg.groqModel, language: this.cfg.language,
+        blob: wav, pool: this.pool, model: this.cfg.groqModel, language: this.cfg.language,
       });
 
       const { stable, cut } = this.agree.push(words);
@@ -487,13 +582,15 @@ export class LiveEngine {
     if (Math.abs(tail.length - this._interimSrc.length) < INTERIM_MIN_DELTA && tail === this._interimSrc) return;
 
     const step = (this.cfg.llmChain || [])[0];
-    if (!step || !step.key) return;
+    if (!step) return;
+    const ikey = step.pool ? step.pool.next() : step.key;
+    if (!ikey) return;
     this._interimBusy = true; this._interimAt = now; this._interimSrc = tail;
     const primary = this.cfg.targets[0];
     const sys = `Translate the fragment into ${(LANGS[primary] || {}).note || primary}
 It is an INCOMPLETE live utterance — translate what is there, do not invent an ending.
 Reply with JSON only: {"t":"..."}`;
-    askOpenAICompat({ key: step.key, base: LLM_PROVIDERS.groq.base, model: INTERIM_MODEL, prompt: tail, sys })
+    askOpenAICompat({ key: ikey, base: LLM_PROVIDERS.groq.base, model: INTERIM_MODEL, prompt: tail, sys })
       .then((raw) => { const o = parseJson(raw) || {}; if (o.t) this.on.interim(String(o.t).trim()); })
       .catch(() => {})
       .finally(() => { this._interimBusy = false; });
@@ -552,6 +649,16 @@ Reply with JSON only: {"t":"..."}`;
   async drain() {
     this._flushSentence();
     await this.translateQueue;
+  }
+
+  /** How many keys are currently not benched — surfaced in the console. */
+  keyHealth() {
+    return {
+      ok: this.pool ? this.pool.healthy() : 0,
+      total: this.pool ? this.pool.size : 0,
+      asrCalls: this.asrCalls || 0,
+      skipped: this.skipped || 0,        // silent windows that cost nothing
+    };
   }
 
   /** Full-session WAV, for pushing through the Mac pipeline afterwards. */

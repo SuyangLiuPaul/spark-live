@@ -120,20 +120,50 @@ Otherwise force-emit after 6 s so committed text is never held hostage.
 
 ## Rate limits — the real live-service constraint
 
-Groq (measured via response headers, 2026-07-02):
+Groq, measured from response headers (re-measured 2026-08-05). **Per key**, and
+note the units differ — the daily request caps, not TPM, are what actually ends a
+long service:
 
-| model | TPM | note |
-|---|---|---|
-| `openai/gpt-oss-120b` | **8,000** | best quality, 2.4 s — *will* throttle on a long service |
-| `groq/compound-mini` | **70,000** | 3.2 s, comparable Dari — the escape hatch |
-| `llama-3.3-70b` | 12,000 | ❌ leaks Chinese into the Dari |
-| `llama-3.1-8b-instant` | 6,000 | used only for the cheap interim tail |
-| `whisper-large-v3` | 7,200 **audio-sec/hr** | we re-transcribe overlaps → watch the multiplier |
+| model | TPM | requests/day | note |
+|---|---|---|---|
+| `openai/gpt-oss-120b` | **8,000** | **1,000** | best quality, 2.4 s — the workhorse |
+| `groq/compound-mini` | 70,000 | **250** | high TPM but a tiny daily cap — emergency valve, not a bulk fallback |
+| `llama-3.3-70b` | 12,000 | — | ❌ leaks Chinese into the Dari |
+| `llama-3.1-8b-instant` | 6,000 | 14,400 | the cheap interim tail; plentiful |
+| `whisper-large-v3` | — | **2,000** | the binding constraint (see below) |
 
-Consequences baked into the design: chain is `gpt-oss-120b → compound-mini →
-gemini → glm`; **each extra target language multiplies output tokens**, so the
-picker warns at 3; and the glossary is filtered per-sentence (`relevantGlossary`)
-because re-sending a long glossary every call was the biggest input-token cost.
+The daily caps are a token bucket, which is why the reset header looks odd:
+`2,000 requests` refilling one per `43.2 s` is exactly `86400/2000`, i.e. 24 h.
+
+**Speech recognition is the tightest bucket.** One request per `TICK_MS` (2.2 s)
+means a 3-hour service wants ≈4,900 requests against 2,000 per key — so a single
+key cannot finish a long service and multiple keys are not optional.
+
+Consequences baked into the design:
+- **`KeyPool` (engine.js)** — N Groq keys **round-robin**, so each stays under its
+  own budget, rather than use-until-throttled which just walks one key into a 429.
+  A key that does 429 is benched (honouring `retry-after`, 5–120 s) and skipped.
+  ASR and chat get **separate pool instances over the same keys**, because Groq
+  meters them separately and a chat 429 must not bench audio budget.
+- **Silent windows are never sent.** `_tick` measures buffer RMS and, if the whole
+  window is below the voice floor with nothing pending in the stabiliser, drops it
+  without an API call. Requests are a *daily* resource, so transcribing silence is
+  permanent waste. `keyHealth()` reports `asrCalls` vs `skipped`.
+- Chain is `gpt-oss-120b → gemini → kimi → glm`; **each extra target language
+  multiplies output tokens**, so the picker warns at 3; and the glossary is
+  filtered per-sentence (`relevantGlossary`) because re-sending a long glossary
+  every call was the biggest input-token cost.
+
+### Budget for a 3-hour service (6 keys)
+
+| bucket | needed | 6-key budget | headroom |
+|---|---|---|---|
+| ASR requests | ~4,900 (fewer with silence-skip) | 12,000/day | ~2.4× |
+| `gpt-oss-120b` requests | ~1,400–2,200 | 6,000/day | ~3× |
+| chat TPM | ~10–13k | 48,000 | ~4× |
+| interim requests | ~4,300 | 86,400/day | ample |
+
+These are **daily** buckets and do not reset between services.
 
 ## Gotchas (each cost a real debugging cycle)
 - **`/join/:code` is a 200 rewrite, not a redirect.** The browser URL keeps the

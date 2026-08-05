@@ -59,13 +59,23 @@ $("openBtn").onclick = () => window.open(`./view.html?s=${session}`, "_blank");
 
 /* ── settings: config.js defaults → localStorage overrides → live edits ── */
 const CFG = window.SPARK_LIVE_CONFIG || {};
-for (const id of ["title", "context", "glossary", "groqKey", "geminiKey", "kimiKey", "glmKey", "lang"]) {
+// A pre-configured pool arrives as an array; the extra keys fill the textarea.
+const PRESET_POOL = Array.isArray(CFG.groqKeys) ? CFG.groqKeys.filter(Boolean) : [];
+for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "geminiKey", "kimiKey", "glmKey", "lang"]) {
   const el = $(id);
   const saved = LS.get(id);
-  const preset = CFG[id] ?? CFG.defaults?.[id] ?? "";
+  const preset = id === "groqKeys2" ? PRESET_POOL.slice(1).join("\n")
+               : id === "groqKey"   ? (CFG.groqKey || PRESET_POOL[0] || "")
+               : CFG[id] ?? CFG.defaults?.[id] ?? "";
   el.value = saved || preset || el.value;
-  el.addEventListener("change", () => LS.set(id, el.value));
+  el.addEventListener("change", () => { LS.set(id, el.value); if (id.startsWith("groq")) readiness(); });
   el.addEventListener("blur", () => LS.set(id, el.value));
+}
+
+/** Every Groq key the operator has given us, primary first, de-duplicated. */
+function groqPool() {
+  const extra = $("groqKeys2").value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  return [...new Set([$("groqKey").value.trim(), ...extra].filter(Boolean))];
 }
 
 // Tell the operator what's ready without making them open anything.
@@ -77,7 +87,9 @@ function readiness() {
     hint.textContent = t("needGroq");
     $("advPanel").open = true;
   } else {
-    hint.textContent = t("ready", have.map((k) => names[k]).join(" → "));
+    const n = groqPool().length;
+    hint.textContent = t("ready", have.map((k) => names[k]).join(" → ")) +
+                       (n > 1 ? ` · ${t("keyPool", n)}` : "");
   }
 }
 readiness();
@@ -191,17 +203,26 @@ $("testBtn").onclick = async () => {
   btn.disabled = true;
   msg.textContent = t("testing");
 
+  // Probe every key in the Groq pool — one dud among four is otherwise invisible.
+  const pool = groqPool();
+  const groqResults = await Promise.all(pool.map(async (k) => {
+    try { return (await fetch("https://api.groq.com/openai/v1/models", { headers: { Authorization: `Bearer ${k}` } })).ok; }
+    catch { return false; }
+  }));
+  const okCount = groqResults.filter(Boolean).length;
+
   const probes = [
-    ["groqKey",   "Groq",   (k) => fetch("https://api.groq.com/openai/v1/models", { headers: { Authorization: `Bearer ${k}` } })],
     ["geminiKey", "Gemini", (k) => fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(k)}`)],
     ["kimiKey",   "Kimi",   (k) => fetch("https://api.moonshot.ai/v1/models", { headers: { Authorization: `Bearer ${k}` } })],
     ["glmKey",    "GLM",    (k) => fetch("https://api.z.ai/api/coding/paas/v4/models", { headers: { Authorization: `Bearer ${k}` } })],
   ];
 
-  const out = [];
+  const out = [pool.length
+    ? `Groq ${okCount}/${pool.length} ${okCount === pool.length ? "✓" : "✗"}`
+    : "Groq —"];
   for (const [id, label, run] of probes) {
     const key = $(id).value.trim();
-    if (!key) { if (id === "groqKey") out.push(`${label} —`); continue; }
+    if (!key) continue;
     try {
       const r = await run(key);
       out.push(`${label} ${r.ok ? "✓" : "✗" + r.status}`);
@@ -216,19 +237,20 @@ $("testBtn").onclick = async () => {
 
 /* ── start / stop ── */
 $("startBtn").onclick = async () => {
-  const groqKey = $("groqKey").value.trim();
-  if (!groqKey) { $("setupMsg").textContent = t("noGroq"); return; }
+  const groqKeys = groqPool();
+  if (!groqKeys.length) { $("setupMsg").textContent = t("noGroq"); return; }
 
   // Fast-and-good first, reliable-but-slow last. Only configured keys join.
+  // The groq step gets no `key`: the engine hands it the rotating pool.
   const llmChain = [
-    { id: "groq",   key: groqKey },
+    { id: "groq",   key: groqKeys[0] },
     { id: "gemini", key: $("geminiKey").value.trim() },
     { id: "kimi",   key: $("kimiKey").value.trim() },
     { id: "glm",    key: $("glmKey").value.trim() },
   ].filter((s) => s.key);
 
   engine = new LiveEngine({
-    groqKey, llmChain, targets,
+    groqKey: groqKeys[0], groqKeys, llmChain, targets,
     language: $("lang").value,
     glossary: $("glossary").value.trim(),
     context: $("context").value.trim(),

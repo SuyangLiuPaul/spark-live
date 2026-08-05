@@ -198,3 +198,12 @@ input, textarea, select, .codeinput { max-width: 100%; box-sizing: border-box; }
   .start-btn { animation: none; }
   * { transition-duration: .01ms !important; }
 }
+
+/* Key material must never render in the clear — the other key fields are
+   password inputs, and a textarea has no equivalent, so mask it in CSS. */
+textarea.secret {
+  -webkit-text-security: disc;
+  text-security: disc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .04em;
+}

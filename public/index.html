@@ -22,7 +22,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&display=swap" />
-<link rel="stylesheet" href="/styles.css?v=4" />
+<link rel="stylesheet" href="/styles.css?v=6" />
 </head>
 <body>
 <div class="wrap">
@@ -128,6 +128,11 @@
     </div>
     <details class="sub" style="margin-top:4px">
       <summary style="cursor:pointer;padding:6px 0" data-i18n="backupKeys">Backup keys (rarely needed)</summary>
+      <div class="field" style="margin-top:10px">
+        <label for="groqKeys2" data-i18n="moreGroq">More Groq keys — one per line</label>
+        <textarea id="groqKeys2" class="secret" style="min-height:76px" spellcheck="false" autocomplete="off" placeholder="gsk_…&#10;gsk_…"></textarea>
+        <div class="hint" data-i18n="moreGroqHint">Each key has its own rate limit, so extra keys buy headroom for a long talk. They rotate automatically.</div>
+      </div>
       <div class="grid two" style="margin-top:10px">
         <div class="field"><label for="geminiKey">Gemini</label>
           <input id="geminiKey" type="password" autocomplete="off" /></div>
