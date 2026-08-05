@@ -168,7 +168,9 @@ button.menuitem:hover{background:var(--panel2); border:none}
 /* ── audience language selector (top-right) ── */
 .langsel{display:flex;gap:4px;background:var(--panel2);border:1px solid var(--line);
   border-radius:999px;padding:3px}
-.langsel .lang{border:none;background:transparent;border-radius:999px;
+/* A two-character CJK label wrapped to two lines and stretched the whole
+   pill group; nothing in a language switch should ever wrap. */
+.langsel .lang{white-space:nowrap;border:none;background:transparent;border-radius:999px;
   padding:7px 13px;font-size:13.5px;font-weight:700;color:var(--dim)}
 .langsel .lang.on{background:linear-gradient(180deg,#4fc4ff,#2a86d8);color:#04121f}
 .langsel .lang:hover{border:none;color:var(--fg)}
@@ -190,7 +192,7 @@ details.adv > *:last-child{margin-bottom:16px}
 /* ── target-language picker ── */
 .langpick{display:flex;flex-wrap:wrap;gap:7px}
 .langpick button{
-  display:inline-flex; align-items:center; justify-content:center;
+  display:inline-flex; align-items:center; justify-content:center; white-space:nowrap;
   height:38px; padding:0 14px; font-size:13px; border-radius:999px;
   font-weight:600; color:var(--dim); line-height:1;
 }
@@ -207,7 +209,7 @@ details.adv > *:last-child{margin-bottom:16px}
 /* ── UI language switch ── */
 .uisel{display:inline-flex;gap:2px;background:var(--panel2);border:1px solid var(--line);
   border-radius:999px;padding:2px;--collapsible:0}
-.uisel .uibtn{display:inline-flex;align-items:center;justify-content:center;
+.uisel .uibtn{display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;
   border:none;background:transparent;border-radius:999px;height:calc(var(--ctl) - 6px);
   padding:0 11px;font-size:12.5px;font-weight:700;color:var(--dim);line-height:1}
 .uisel .uibtn.on{background:linear-gradient(180deg,#4fc4ff,#2a86d8);color:#04121f}
