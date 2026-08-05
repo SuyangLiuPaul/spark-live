@@ -1,11 +1,16 @@
 # Spark Live — HANDOFF
 
 ## Environments
-- **Production** — Netlify site `spark-live-translate`. Deployed from a staged copy
-  that **excludes `public/config.js`**, so no API key is ever served publicly
-  (`/config.js` returns 404 — verified). Users bring their own key (BYOK).
+- **Production** — a Netlify site, deployed from a staged copy that **excludes**
+  `public/config.js` and substitutes an empty `window.SPARK_LIVE_CONFIG = {}`, so
+  no API key is ever served publicly. Users bring their own key (BYOK).
+  (Serving nothing at all is worse than the stub: `/config.js` then falls through
+  to the SPA rewrite and hands `index.html` to a `<script>` tag.)
 - **Dev** — separate Netlify site, deployed WITH `config.js` pre-filled for testing.
   That URL is effectively key-bearing: treat it as private and rotate if shared.
+- **Site IDs are pinned in `.netlify/state.json` (gitignored).** Deploying with
+  neither that file nor `--site` makes Netlify create a *brand-new public site* —
+  which, from `--dir=public`, publishes your keys. Always pass `--site`.
 - **Public repo** — `SuyangLiuPaul/spark-live` (MIT). Audited by cloning the pushed
   tree: 0 key patterns, 0 tokens, `config.js` untracked, 0 deployment URLs in docs,
   and 0 secret matches across the whole git history.
