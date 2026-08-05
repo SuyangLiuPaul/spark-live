@@ -1,4 +1,4 @@
-import { LiveEngine, LANGS } from "./engine.js";
+import { LiveEngine, LANGS , listInputs } from "./engine.js";
 import { t, applyI18n, mountUiSwitch } from "./i18n.js";
 import { createPublisher } from "./channel.js";
 import { createWakeLock, createConnection, createToast, micErrorMessage } from "./resilience.js";
@@ -149,6 +149,41 @@ if (typeof ResizeObserver === "function") {
   new ResizeObserver(syncLangScrollHint).observe($("langpick"));
 }
 window.addEventListener("orientationchange", syncLangScrollHint);
+
+/* ── microphone picker ───────────────────────────────────────────────
+   A laptop plugged into a sound desk still defaults to the built-in mic,
+   which records the room instead of the PA feed. Device labels are only
+   revealed after mic permission, so before that we say so rather than
+   presenting a list of blanks. */
+let micId = LS.get("micId") || "";
+
+async function renderMics() {
+  const sel = $("mic");
+  const { devices, labelled } = await listInputs();
+  if (!devices.length) {
+    sel.innerHTML = `<option value="">${t("micDefault")}</option>`;
+    $("micHint").textContent = t("micNoList");
+    return;
+  }
+  // A remembered device that has been unplugged shouldn't look selected.
+  if (micId && !devices.some((d) => d.deviceId === micId)) micId = "";
+  sel.innerHTML =
+    `<option value="">${t("micDefault")}</option>` +
+    devices.map((d, i) =>
+      `<option value="${d.deviceId}"${d.deviceId === micId ? " selected" : ""}>${
+        esc(d.label || t("micNumbered", i + 1))}</option>`).join("");
+  $("micHint").textContent = labelled ? t("micPickHint") : t("micNamesHidden");
+}
+
+$("mic").addEventListener("change", () => {
+  micId = $("mic").value;
+  LS.set("micId", micId);
+  if (engine) toast(t("micChangeRestart"), "bad");
+});
+
+// Someone plugging in an interface mid-setup should see it appear.
+navigator.mediaDevices?.addEventListener?.("devicechange", renderMics);
+renderMics();
 
 mountUiSwitch($("uiSwitch"));
 applyI18n();
@@ -309,7 +344,7 @@ $("startBtn").onclick = async () => {
   ].filter((s) => s.key);
 
   engine = new LiveEngine({
-    groqKey: groqKeys[0], groqKeys, proxy: useProxy, llmChain, targets,
+    groqKey: groqKeys[0], groqKeys, proxy: useProxy, deviceId: micId, llmChain, targets,
     language: $("lang").value,
     glossary: $("glossary").value.trim(),
     context: $("context").value.trim(),
@@ -344,6 +379,8 @@ $("startBtn").onclick = async () => {
 
   // A sleeping screen ends the session; hold the lock for as long as we're live.
   wake.on();
+  // Permission has now been granted, so device labels are readable.
+  renderMics();
 
   doc.title = $("title").value.trim() || "Spark Live";
   doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));

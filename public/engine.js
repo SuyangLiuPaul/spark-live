@@ -52,6 +52,18 @@ class Cap extends AudioWorkletProcessor {
 registerProcessor('cap', Cap);
 `;
 
+/**
+ * Audio inputs the browser will let us use. Labels are only populated once mic
+ * permission has been granted — before that the OS returns anonymous entries,
+ * so callers should say so rather than showing a list of blanks.
+ */
+export async function listInputs() {
+  if (!navigator.mediaDevices?.enumerateDevices) return { devices: [], labelled: false };
+  const all = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+  const devices = all.filter((d) => d.kind === "audioinput" && d.deviceId);
+  return { devices, labelled: devices.some((d) => d.label) };
+}
+
 class Capture {
   constructor(onChunk) {
     this.onChunk = onChunk;
@@ -62,14 +74,18 @@ class Capture {
   }
 
   async start() {
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: false,   // we want the room, not a cleaned-up call
-        noiseSuppression: false,   // NS eats quiet speech from a distant speaker
-        autoGainControl: true,
-      },
-    });
+    const audio = {
+      channelCount: 1,
+      echoCancellation: false,   // we want the room, not a cleaned-up call
+      noiseSuppression: false,   // NS eats quiet speech from a distant speaker
+      autoGainControl: true,
+    };
+    // A laptop presenter is usually plugged into a sound desk or a USB mic, so
+    // the OS default is often the wrong input. `exact` would throw if the saved
+    // device is gone (unplugged between services), so prefer it and let the
+    // browser fall back rather than refusing to start.
+    if (this.deviceId) audio.deviceId = { ideal: this.deviceId };
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio });
     this.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     if (this.ctx.state === "suspended") await this.ctx.resume();
     this.src = this.ctx.createMediaStreamSource(this.stream);
@@ -484,7 +500,7 @@ export class LiveEngine {
       // large-v3 over turbo: measured on real sermon audio it fixed a homophone
       // (當日→當然), avoided a garbled run, and ADDS PUNCTUATION (which the
       // sentence splitter below depends on) for ~0.1 s more on a 25 s window.
-      groqKey: "", groqKeys: [], proxy: false, groqModel: "whisper-large-v3", language: "auto",
+      groqKey: "", groqKeys: [], proxy: false, deviceId: "", groqModel: "whisper-large-v3", language: "auto",
       llmChain: [],            // ordered [{id, key, model?, base?}]; groq steps get the pool
       targets: ["prs"],        // audience languages, first = primary
       interim: true,           // cheap provisional translation of the live tail
@@ -525,6 +541,7 @@ export class LiveEngine {
     if (!this.cfg.llmChain || !this.cfg.llmChain.length) throw new Error("missing_llm_key");
 
     this.cap = new Capture((chunk, rate) => this._audio(chunk, rate));
+    this.cap.deviceId = this.cfg.deviceId || "";
     this.rate = await this.cap.start();
     this.running = true;
     this.lastVoiceAt = Date.now();
