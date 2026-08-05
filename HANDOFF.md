@@ -1,5 +1,22 @@
 # Spark Live — HANDOFF
 
+## Environments
+- **Production** — Netlify site `spark-live-translate`. Deployed from a staged copy
+  that **excludes `public/config.js`**, so no API key is ever served publicly
+  (`/config.js` returns 404 — verified). Users bring their own key (BYOK).
+- **Dev** — separate Netlify site, deployed WITH `config.js` pre-filled for testing.
+  That URL is effectively key-bearing: treat it as private and rotate if shared.
+- **Public repo** — `SuyangLiuPaul/spark-live` (MIT). Audited by cloning the pushed
+  tree: 0 key patterns, 0 tokens, `config.js` untracked, 0 deployment URLs in docs,
+  and 0 secret matches across the whole git history.
+
+### Deploy prod (never `--dir=public` directly — that ships config.js)
+```bash
+python3 -c "import shutil,tempfile,os;d=tempfile.mkdtemp();\
+shutil.copytree('public',d,dirs_exist_ok=True,ignore=shutil.ignore_patterns('config.js'));print(d)"
+netlify deploy --prod --dir=<that dir> --functions=netlify/functions --site=<prod-site-id>
+```
+
 Live transcription + **Dari (دری)** translation shown to an audience on their own
 phones. Separate from the main Spark Transcribe app (which is batch: upload →
 local Whisper → PDF). Deployed **standalone** so it can never disturb production.
