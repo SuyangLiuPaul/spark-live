@@ -267,10 +267,33 @@ export class KeyPool {
     // Everything is benched — return the one that frees up soonest.
     return this.keys.reduce((a, b) => ((this.cool.get(a) || 0) <= (this.cool.get(b) || 0) ? a : b));
   }
-  /** Bench a key after a 429. `retryAfter` is seconds, when the API tells us. */
+  /**
+   * Bench a key after a 429, for as long as the API says.
+   *
+   * This used to clamp the wait to 2 minutes, which is right for a per-minute
+   * token limit but wrong for the daily request cap: an exhausted key would
+   * re-enter the rotation every 2 minutes, fail again, and be benched again —
+   * spending a failed round-trip and delaying real work each time.
+   *
+   * Groq's daily cap refills continuously (~43s per whisper request, ~86s per
+   * chat request), so `retry-after` is usually tens of seconds rather than
+   * hours. Honour whatever it says; the hour ceiling is only a sanity bound so
+   * a malformed header can't bench a key for the rest of the service.
+   */
   bench(key, retryAfter) {
-    const ms = Math.min(120000, Math.max(5000, (Number(retryAfter) || 30) * 1000));
+    const secs = Number(retryAfter);
+    const ms = Number.isFinite(secs) && secs > 0
+      ? Math.min(3600000, Math.max(5000, secs * 1000))
+      : 60000;                                   // no header: assume a refill gap
     this.cool.set(key, Date.now() + ms);
+  }
+
+  /** Seconds until the earliest key frees up — for telling the operator. */
+  nextFreeIn() {
+    if (!this.keys.length) return 0;
+    const now = Date.now();
+    const soonest = Math.min(...this.keys.map((k) => this.cool.get(k) || 0));
+    return Math.max(0, Math.round((soonest - now) / 1000));
   }
   healthy() { const now = Date.now(); return this.keys.filter((k) => (this.cool.get(k) || 0) <= now).length; }
 }
