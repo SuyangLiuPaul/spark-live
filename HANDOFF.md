@@ -211,6 +211,42 @@ correct on first paint (measuring overflow, setting a class) has to be
 synchronous, or a page opened in a background tab renders wrong and stays wrong
 until something resizes. Same class of bug as the `setInterval` throttling.
 
+## Soak testing (`tools/stress.py`)
+Drives the real endpoints at the engine's own cadence, so the numbers mean
+something. It spends real quota — a minute costs ~27 ASR requests of a
+16,000/day 8-key pool (~0.17%).
+
+```bash
+python3 tools/stress.py --minutes 5
+```
+
+**Measured 2026-08-05, 4 min at full cadence, 8-key hosted pool:** 67 ASR +
+26 translate, **zero 429, zero errors**. ASR p50 2.08 s, chat p50 1.64 s.
+One 21.6 s ASR outlier — a cold function start, not systematic: a paired
+10-call comparison right after showed proxy max 1.87 s.
+
+### Hosted proxy costs ~0.5 s per ASR pass
+Paired direct-vs-proxied calls, same audio, median of 4:
+
+| window | payload | direct | proxied | overhead |
+|---|---|---|---|---|
+| 2 s | 63 K | 0.30 s | 0.77 s | +0.47 s |
+| 4 s | 125 K | 0.34 s | 0.81 s | +0.47 s |
+| 8 s | 250 K | 0.43 s | 0.99 s | +0.56 s |
+| 16 s | 500 K | 0.57 s | 1.28 s | +0.71 s |
+
+The audio travels twice (browser → function → Groq), so the penalty scales
+with window size. Typical windows are 4-8 s, so budget **~0.5 s**. A presenter
+who enters their own key in Settings goes direct and gets that back — worth
+knowing for a latency-sensitive room.
+
+### Theoretical ceiling (8 keys)
+ASR is the binding bucket: 16,000 requests at one per 2.2 s = **9.8 h** of
+continuous speech; ~12 h with 20% silence skipped, ~14 h with 30%. Translate
+is 13.3 h, interim 80 h. Past exhaustion it degrades rather than stops — the
+daily cap refills continuously, so the pool sustains one ASR pass every 5.4 s
+instead of 2.2 s. These are **daily** totals, shared across services.
+
 ## Gotchas (each cost a real debugging cycle)
 - **`/join/:code` is a 200 rewrite, not a redirect.** The browser URL keeps the
   path and carries **no query string** → assets must use **absolute** paths
