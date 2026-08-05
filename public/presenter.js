@@ -200,6 +200,14 @@ function renderLines() {
 }
 const esc = (s) => String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+/* The top bar is sticky, so Settings is reachable at any scroll position and in
+   any state — previously it only existed inside the live panel. */
+$("topSettingsBtn").onclick = () => {
+  const adv = $("advPanel");
+  adv.open = !adv.open;
+  if (adv.open) adv.scrollIntoView({ behavior: "smooth", block: "start" });
+};
+
 /* ── key test ── */
 $("testBtn").onclick = async () => {
   // Result goes NEXT TO THE BUTTON. It used to write to #setupMsg up beside the

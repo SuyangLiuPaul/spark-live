@@ -22,7 +22,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&display=swap" />
-<link rel="stylesheet" href="/styles.css?v=9" />
+<link rel="stylesheet" href="/styles.css?v=11" />
 </head>
 <body>
 <div class="wrap">
@@ -33,9 +33,11 @@
       <h1>Spark Live</h1>
     </div>
     <span class="pill" id="statePill" data-i18n="stateIdle">Not started</span>
-    <div class="spacer"></div>
     <span class="sub" data-i18n="tagline">English / Chinese → any language</span>
-    <div class="uisel" id="uiSwitch"></div>
+    <nav class="topnav">
+      <div class="uisel" id="uiSwitch"></div>
+      <button class="iconbtn" id="topSettingsBtn" aria-label="Settings" title="Settings">⚙</button>
+    </nav>
   </div>
 
   <!-- ══ START ══ -->

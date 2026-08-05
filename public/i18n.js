@@ -203,13 +203,35 @@ export function applyI18n(root = document) {
   document.body.classList.toggle("ui-rtl", RTL_UI.has(cur));
 }
 
-/** Renders the EN / 中文 switch into `el`. */
+/**
+ * Renders the EN / دری / 中文 switch into `el`.
+ *
+ * All three segments side by side are 3 rows' worth of top bar on a 375px
+ * phone, so on narrow screens CSS collapses this to the active language and
+ * the first tap expands it. Desktop keeps the plain segmented control.
+ */
 export function mountUiSwitch(el) {
   if (!el) return;
+  el.classList.add("collapsible");
+  const close = () => el.classList.remove("open");
   const draw = () => {
     el.innerHTML = UI_LANGS.map((l) =>
       `<button class="uibtn ${l.c === cur ? "on" : ""}" data-ui="${l.c}">${l.label}</button>`).join("");
-    for (const b of el.querySelectorAll("[data-ui]")) b.onclick = () => { setUiLang(b.dataset.ui); draw(); };
+    for (const b of el.querySelectorAll("[data-ui]")) {
+      b.onclick = (ev) => {
+        // Only meaningful while collapsed; when expanded every segment is a choice.
+        const collapsed = getComputedStyle(el).getPropertyValue("--collapsible").trim() === "1";
+        if (collapsed && !el.classList.contains("open")) {
+          el.classList.add("open");
+          ev.stopPropagation();
+          return;
+        }
+        setUiLang(b.dataset.ui);
+        close();
+        draw();
+      };
+    }
   };
   draw();
+  document.addEventListener("click", (e) => { if (!el.contains(e.target)) close(); });
 }

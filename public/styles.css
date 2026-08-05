@@ -16,12 +16,24 @@ body{
   direction:rtl; text-align:right;
   font-family:"Noto Naskh Arabic","Vazirmatn","Geeza Pro","Iranian Sans",Tahoma,serif;
 }
-.wrap{max-width:1180px;margin:0 auto;padding:18px 16px 60px}
+.wrap{max-width:1180px;margin:0 auto;padding:0 16px 60px}
 h1{font-size:20px;font-weight:800;letter-spacing:.02em}
 h2{font-size:13px;font-weight:700;color:var(--dim);letter-spacing:.14em;text-transform:uppercase;margin-bottom:10px}
 .sub{color:var(--dim);font-size:13px}
 
-.topbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px;min-height:34px}
+/* Sticky app bar.
+   `viewport-fit=cover` + black-translucent status bar means an installed web
+   app paints UNDER the iOS status bar, so without env(safe-area-inset-top) the
+   title sits behind the clock and notch — the bar looked simply missing.
+   The negative margin lets it span the full width inside .wrap's padding. */
+.topbar{
+  position:sticky; top:0; z-index:20;
+  display:flex; align-items:center; gap:10px 12px; flex-wrap:wrap;
+  margin:0 -16px 18px; padding:calc(12px + env(safe-area-inset-top)) 16px 12px;
+  min-height:34px;
+  background:rgba(11,15,23,.9); backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);
+}
 .brand{display:flex;align-items:center;gap:9px}
 /* h1 and the status pill are different type sizes, so equal line boxes are what
    actually make them look aligned — centring alone leaves the pill sitting low. */
@@ -88,7 +100,8 @@ button:disabled{opacity:.45;cursor:not-allowed}
 /* ── audience view ── */
 .stage{min-height:100vh;display:flex;flex-direction:column;padding:0}
 .stagebar{
-  display:flex;align-items:center;gap:10px;padding:10px 14px;
+  display:flex;align-items:center;gap:10px;
+  padding:calc(10px + env(safe-area-inset-top)) 14px 10px;
   border-bottom:1px solid var(--line);background:rgba(11,15,23,.92);
   position:sticky;top:0;z-index:5;backdrop-filter:blur(8px);flex-wrap:wrap;
 }
@@ -99,6 +112,13 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .entry.pending .dari{opacity:.55}
 .entry.live{border-left:3px solid var(--warn);padding-left:14px}
 .iconbtn{padding:8px 12px;font-size:13px}
+/* Top-bar controls share the pill height so the bar reads as one row. */
+.topbar .iconbtn{
+  display:inline-flex; align-items:center; justify-content:center;
+  height:var(--ctl); padding:0 12px; font-size:14px; line-height:1;
+}
+.topnav{display:flex; align-items:center; gap:8px; margin-left:auto}
+.ui-rtl .topnav{margin-left:0; margin-right:auto}
 .big{font-size:15px}
 .center{text-align:center}
 .empty{color:var(--faint);text-align:center;padding:60px 20px;font-size:15px}
@@ -144,7 +164,7 @@ details.adv > *:last-child{margin-bottom:16px}
 
 /* ── UI language switch ── */
 .uisel{display:inline-flex;gap:2px;background:var(--panel2);border:1px solid var(--line);
-  border-radius:999px;padding:2px;margin-left:10px}
+  border-radius:999px;padding:2px;--collapsible:0}
 .uisel .uibtn{display:inline-flex;align-items:center;justify-content:center;
   border:none;background:transparent;border-radius:999px;height:calc(var(--ctl) - 6px);
   padding:0 11px;font-size:12.5px;font-weight:700;color:var(--dim);line-height:1}
@@ -204,9 +224,16 @@ input, textarea, select, .codeinput { max-width: 100%; box-sizing: border-box; }
   .wrap { padding: 12px 12px 48px; }
   .panel { padding: 14px; border-radius: 12px; }
   h1 { font-size: 18px; }
-  .topbar { gap: 8px; row-gap: 6px; }
-  .topbar .sub { font-size: 12px; order: 3; flex: 1 1 100%; }
-  .uisel { margin-left: 0; order: 2; }
+  .topbar { gap: 8px; padding-left: 12px; padding-right: 12px; margin: 0 -12px 14px; }
+  /* The tagline is decorative; on a phone it cost a whole row above the fold. */
+  .topbar .sub { display: none; }
+  .topbar h1 { font-size: 17px; }
+  .topnav { gap: 6px; }
+  .uisel .uibtn { padding: 0 9px; }
+  /* Collapsed: show only the active language, with a caret to say it opens. */
+  .uisel.collapsible { --collapsible: 1; }
+  .uisel.collapsible:not(.open) .uibtn:not(.on) { display: none; }
+  .uisel.collapsible:not(.open) .uibtn.on::after { content: " ⌄"; opacity: .7; font-size: 10px; }
   .big-start { width: 100%; text-align: center; padding: 15px 20px; }
   .row > button { flex: 1 1 auto; }
   .langpick button { padding: 8px 12px; font-size: 12.5px; }
