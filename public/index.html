@@ -22,7 +22,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&display=swap" />
-<link rel="stylesheet" href="/styles.css?v=16" />
+<link rel="stylesheet" href="/styles.css?v=19" />
 </head>
 <body>
 <div class="wrap">
@@ -69,8 +69,12 @@
     <div class="joinbox">
       <div class="qr" id="qr"></div>
       <div>
-        <input class="code codeinput" id="code" maxlength="12" spellcheck="false"
-               autocapitalize="characters" autocomplete="off" aria-label="Session code" />
+        <div class="coderow">
+          <input class="code codeinput" id="code" maxlength="12" spellcheck="false"
+                 autocapitalize="characters" autocomplete="off" aria-label="Session code" />
+          <button class="iconbtn newcode" id="newCodeBtn" type="button"
+                  data-i18n-al="newCodeLabel" aria-label="New code" title="New code">↻</button>
+        </div>
         <div class="hint" id="codeMsg" data-i18n="codeHint">Editable — reuse the same code so a saved link keeps working.</div>
         <div class="sub" id="joinUrl" style="margin:6px 0 10px;word-break:break-all"></div>
         <div class="row">
@@ -98,57 +102,71 @@
     <div class="lines" id="lines"></div>
   </div>
 
-  <!-- ══ ADVANCED ══ -->
+  <!-- ══ SETTINGS ══ -->
   <details class="panel adv" id="advPanel">
-    <summary data-i18n="advanced">Advanced — glossary, context, source language, keys</summary>
+    <summary data-i18n="advanced">Settings — glossary, context, source language, keys</summary>
 
-    <div class="field" style="margin-top:14px">
-      <label for="glossary" data-i18n="glossaryLabel">Glossary — the single biggest accuracy lever</label>
-      <textarea id="glossary" data-i18n-ph="glossaryPh"></textarea>
-      <div class="hint" data-i18n="glossaryHint">Names, places, scripture books, jargon.</div>
-    </div>
-
-    <div class="grid two">
+    <section class="settings-group">
+      <h2 data-i18n="secAccuracy">Accuracy</h2>
       <div class="field">
-        <label for="lang" data-i18n="srcLangLabel">Source language</label>
-        <select id="lang">
-          <option value="auto" data-i18n="srcAuto">Auto-detect (mixed EN/Chinese)</option>
-          <option value="en" data-i18n="srcEn">English</option>
-          <option value="zh" data-i18n="srcZh">Chinese</option>
-        </select>
+        <label for="glossary" data-i18n="glossaryLabel">Glossary — the single biggest accuracy lever</label>
+        <textarea id="glossary" data-i18n-ph="glossaryPh"></textarea>
+        <div class="hint" data-i18n="glossaryHint">Names, places, scripture books, jargon.</div>
       </div>
-      <div class="field">
-        <label for="context" data-i18n="contextLabel">Session context (for the AI)</label>
-        <textarea id="context" style="min-height:52px" data-i18n-ph="contextPh"></textarea>
+      <div class="grid two">
+        <div class="field">
+          <label for="lang" data-i18n="srcLangLabel">Source language</label>
+          <select id="lang">
+            <option value="auto" data-i18n="srcAuto">Auto-detect (mixed EN/Chinese)</option>
+            <option value="en" data-i18n="srcEn">English</option>
+            <option value="zh" data-i18n="srcZh">Chinese</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="context" data-i18n="contextLabel">Session context (for the AI)</label>
+          <textarea id="context" class="short" data-i18n-ph="contextPh"></textarea>
+        </div>
       </div>
-    </div>
+    </section>
 
-    <h2 style="margin-top:8px" data-i18n="keysHead">API key</h2>
-    <div class="field">
-      <label for="groqKey" data-i18n="groqLabel">Groq — powers both recognition and translation</label>
-      <input id="groqKey" type="password" autocomplete="off" placeholder="gsk_…" />
-      <div class="hint" data-i18n="groqHint">This one key is enough.</div>
-    </div>
-    <div class="row" style="margin-bottom:10px">
-      <button id="testBtn" data-i18n="testKey">Test key</button>
-      <span class="sub" id="keyMsg"></span>
-    </div>
-    <details class="sub" style="margin-top:4px">
-      <summary style="cursor:pointer;padding:6px 0" data-i18n="backupKeys">Backup keys (rarely needed)</summary>
-      <div class="field" style="margin-top:10px">
-        <label for="groqKeys2" data-i18n="moreGroq">More Groq keys — one per line</label>
-        <textarea id="groqKeys2" class="secret" style="min-height:76px" spellcheck="false" autocomplete="off" placeholder="gsk_…&#10;gsk_…"></textarea>
-        <div class="hint" data-i18n="moreGroqHint">Each key has its own rate limit, so extra keys buy headroom for a long talk. They rotate automatically.</div>
+    <section class="settings-group">
+      <h2 data-i18n="secKeys">AI keys</h2>
+
+      <!-- On a hosted deployment the keys live on the server, so asking for one
+           here would be misleading. Shown/hidden by presenter.js. -->
+      <p class="notice" id="hostedNotice" hidden data-i18n="hostedNotice">
+        This site already provides the AI service — you don't need a key. Add one
+        below only if you'd rather use your own quota.
+      </p>
+
+      <div class="field">
+        <label for="groqKey" data-i18n="groqLabel">Groq — powers both recognition and translation</label>
+        <input id="groqKey" type="password" autocomplete="off" placeholder="gsk_…" />
+        <div class="hint" id="groqHint" data-i18n="groqHint">This one key is enough.</div>
       </div>
-      <div class="grid two" style="margin-top:10px">
-        <div class="field"><label for="geminiKey">Gemini</label>
-          <input id="geminiKey" type="password" autocomplete="off" /></div>
-        <div class="field"><label for="kimiKey">Kimi</label>
-          <input id="kimiKey" type="password" autocomplete="off" /></div>
-        <div class="field"><label for="glmKey">GLM</label>
-          <input id="glmKey" type="password" autocomplete="off" /></div>
+      <div class="row">
+        <button id="testBtn" data-i18n="testKey">Test key</button>
+        <span class="sub" id="keyMsg" role="status" aria-live="polite"></span>
       </div>
-    </details>
+
+      <details class="sub subfold">
+        <summary data-i18n="backupKeys">Backup keys (rarely needed)</summary>
+        <div class="field">
+          <label for="groqKeys2" data-i18n="moreGroq">More Groq keys — one per line</label>
+          <textarea id="groqKeys2" class="secret" spellcheck="false" autocomplete="off" placeholder="gsk_&#10;gsk_"></textarea>
+          <div class="hint" data-i18n="moreGroqHint">Each key has its own rate limit.</div>
+        </div>
+        <div class="grid two">
+          <div class="field"><label for="geminiKey">Gemini</label>
+            <input id="geminiKey" type="password" autocomplete="off" /></div>
+          <div class="field"><label for="kimiKey">Kimi</label>
+            <input id="kimiKey" type="password" autocomplete="off" /></div>
+          <div class="field"><label for="glmKey">GLM</label>
+            <input id="glmKey" type="password" autocomplete="off" /></div>
+        </div>
+      </details>
+    </section>
+  </details>
   </details>
 
   <footer class="sitefoot">

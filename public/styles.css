@@ -139,7 +139,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .menubtn{font-size:18px; line-height:1; letter-spacing:.06em}
 .menu{
   position:absolute; top:calc(100% + 8px); inset-inline-end:0; z-index:40;
-  min-width:min(268px, calc(100vw - 28px));
+  min-width:min(304px, calc(100vw - 28px));
   background:var(--panel); border:1px solid var(--line); border-radius:14px;
   padding:6px; box-shadow:0 18px 44px rgba(0,0,0,.55);
 }
@@ -152,6 +152,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
 }
 button.menuitem:hover{background:var(--panel2); border:none}
 .menuitem.static{cursor:default}
+/* Item labels sit opposite a control; letting them wrap made the row two lines
+   tall and knocked the menu out of rhythm. */
+.menuitem > span:first-child{white-space:nowrap}
 .menuitem .tick{color:var(--accent2); font-size:13px; opacity:0; transition:opacity .12s}
 .menuitem[aria-checked="true"] .tick{opacity:1}
 .sizectl{display:inline-flex; align-items:center; gap:8px}
@@ -221,6 +224,12 @@ details.adv > *:last-child{margin-bottom:16px}
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:30px;font-weight:800;
   letter-spacing:.22em;color:var(--accent2);padding:4px 10px;border-radius:10px;
 }
+.coderow{display:flex; align-items:center; gap:8px}
+.newcode{
+  flex:none; width:44px; height:44px; padding:0; font-size:17px; line-height:1;
+  display:inline-flex; align-items:center; justify-content:center;
+}
+.newcode:disabled{opacity:.4}
 .codeinput:hover{border-color:var(--accent)}
 .codeinput:disabled{opacity:.7;border-style:solid;cursor:not-allowed}
 
@@ -406,3 +415,36 @@ body.offline .stagebar{margin-bottom:26px}
 @media (prefers-reduced-motion: reduce){
   .toast{transition:none}
 }
+
+/* The top bar collapses the interface-language switch because it is cramped.
+   Inside the display menu there is room for all three, and collapsing there
+   left only one language reachable — so undo it, after the media query that
+   sets it (equal specificity, so source order decides). */
+.menu .uisel.collapsible{--collapsible:0}
+/* Must out-specify `.uisel.collapsible:not(.open) .uibtn:not(.on)` — :not()
+   contributes its argument's specificity, so that selector scores 5 classes
+   and a plainer override silently loses. */
+.menu .uisel.collapsible:not(.open) .uibtn:not(.on){display:inline-flex}
+.menu .uisel.collapsible:not(.open) .uibtn.on::after{content:none}
+
+/* ── settings panel ───────────────────────────────────────────────────
+   Glossary, source language, context and keys previously ran together as
+   one undifferentiated column of fields. Grouping them makes the panel
+   scannable and gives the key section somewhere to state hosted mode. */
+.settings-group{padding-top:16px}
+.settings-group + .settings-group{margin-top:6px; border-top:1px solid var(--line)}
+.settings-group > h2{margin-bottom:12px}
+.settings-group .row{margin-bottom:10px}
+textarea.short{min-height:52px}
+.subfold > summary{cursor:pointer; padding:8px 0; font-weight:600}
+.subfold > summary:hover{color:var(--fg)}
+.subfold .field, .subfold .grid{margin-top:10px}
+
+/* Says what is true on a hosted deployment: no key required. Without it the
+   panel asks for a key it does not need, which reads as a broken setup. */
+.notice{
+  margin:0 0 14px; padding:11px 13px; border-radius:11px;
+  background:rgba(87,201,255,.09); border:1px solid rgba(87,201,255,.28);
+  color:var(--dim); font-size:12.5px; line-height:1.55;
+}
+.notice[hidden]{display:none}

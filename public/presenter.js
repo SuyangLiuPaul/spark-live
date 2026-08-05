@@ -52,9 +52,18 @@ $("code").addEventListener("change", async () => {
 });
 
 $("copyBtn").onclick = async () => {
-  try { await navigator.clipboard.writeText(joinUrl); $("copyBtn").textContent = t("copied"); }
-  catch { $("copyBtn").textContent = t("copyManual"); }
-  toast(t("copied"));
+  // `joinUrl` here used to be a bare identifier with no declaration, which
+  // silently resolved to window.joinUrl — the <div id="joinUrl"> element — so
+  // the clipboard received "[object HTMLDivElement]". Always build it.
+  const url = joinUrlFor(session);
+  try {
+    await navigator.clipboard.writeText(url);
+    $("copyBtn").textContent = t("copied");
+    toast(t("copied"));
+  } catch {
+    $("copyBtn").textContent = t("copyManual");
+    toast(t("copyManual"), "bad");
+  }
   setTimeout(() => ($("copyBtn").textContent = t("copyLink")), 1600);
 };
 $("openBtn").onclick = () => window.open(`./view.html?s=${session}`, "_blank");
@@ -76,6 +85,11 @@ for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "gemin
 
 /** True when the site carries a server-side key pool (hosted, no key entry). */
 const HOSTED = !!CFG.proxy;
+if (HOSTED) {
+  // Otherwise the panel prominently demands a key the site does not need.
+  $("hostedNotice").hidden = false;
+  $("groqHint").setAttribute("data-i18n", "groqHintHosted");
+}
 
 /** Every Groq key the operator has given us, primary first, de-duplicated. */
 function groqPool() {
@@ -102,6 +116,19 @@ function readiness() {
 }
 readiness();
 
+/* Publish an "not started yet" document as soon as the console opens.
+   Until now nothing existed server-side until Start was pressed, so previewing
+   the audience view — or sharing the link ahead of the service — showed
+   "Session not found", which reads as a broken app. This also claims the code
+   with our token before anyone else can take it. */
+function announceIdle() {
+  doc.title = $("title").value.trim() || "Spark Live";
+  doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
+  doc.live = false;
+  doc.ended = false;
+  schedulePush();
+}
+
 /* ── target languages ── */
 const DEFAULT_TARGETS = ["prs", "en"];
 let targets = (() => {
@@ -120,6 +147,7 @@ function renderLangPick() {
       if (!targets.length) targets = ["prs"];
       LS.set("targets", JSON.stringify(targets));
       renderLangPick(); renderPreviewLang();
+      if (!engine) announceIdle();          // pre-start: keep viewers in sync
       // Mid-session edits apply to NEW lines; already-translated lines keep what
       // they have (re-translating history would be a surprise cost).
       if (engine) {
@@ -414,6 +442,23 @@ $("stopBtn").onclick = async () => {
 };
 
 /* Start a brand-new session: fresh code so old audience links don't collide. */
+/* Regenerate the code without leaving the page. The full-reload path used by
+   "New session" is fine after a service, but before one has started the
+   operator is usually just claiming a fresh code, and losing their typed title
+   and glossary to a reload would be hostile. */
+$("newCodeBtn").onclick = async () => {
+  if (engine && doc.live) { $("codeMsg").textContent = t("codeLocked"); toast(t("codeLocked"), "bad"); return; }
+  session = rand(6);
+  token = rand(8) + rand(8);              // fresh claim, so an old device can't publish
+  LS.set("session", session); LS.set("token", token);
+  publisher = createPublisher({ session, token });
+  doc.v = 0;
+  await paintSession();
+  announceIdle();
+  $("codeMsg").textContent = t("codeSaved");
+  toast(t("newCodeMade", session));
+};
+
 $("newBtn").onclick = () => {
   engine = null;
   session = rand(6); token = rand(8) + rand(8);   // fresh code + fresh claim
@@ -438,3 +483,7 @@ $("dlBtn").onclick = () => {
 window.addEventListener("beforeunload", (e) => {
   if (engine && doc.live) { e.preventDefault(); e.returnValue = ""; }
 });
+
+// Runs last on purpose: it touches `doc`, `publisher` and `schedulePush`, all of
+// which are declared below the language-picker setup where this used to sit.
+announceIdle();
