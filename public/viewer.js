@@ -81,7 +81,7 @@ $("fsBtn").onclick = () => {
 if (!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen)) {
   $("fsBtn").hidden = true;
 }
-mountUiSwitch($("uiSwitch"));
+mountUiSwitch($("uiSwitch"), { variant: "inline" });
 applyI18n();
 apply();
 window.addEventListener("ui:lang", () => { applyI18n(); lastSig = ""; if (lastDoc) render(lastDoc); });

@@ -62,6 +62,7 @@ const DICT = {
     secKeys: "AI keys",
     hostedNotice: "This site already provides the AI service — you don't need a key. Add one below only if you'd rather use your own quota.",
     groqHintHosted: "Optional. Leave empty to use the hosted service.",
+    uiLangLabel: "Interface language",
     menuLabel: "Display options",
     menuSource: "Show original text",
     menuTextSize: "Text size",
@@ -140,6 +141,7 @@ const DICT = {
     secKeys: "کلیدهای هوش مصنوعی",
     hostedNotice: "این سایت خودش سرویس هوش مصنوعی را فراهم می‌کند — به کلید نیاز ندارید. فقط اگر می‌خواهید از سهمیهٔ خودتان استفاده کنید کلید اضافه کنید.",
     groqHintHosted: "اختیاری. برای استفاده از سرویس میزبان، خالی بگذارید.",
+    uiLangLabel: "زبان رابط",
     menuLabel: "تنظیمات نمایش",
     menuSource: "نمایش متن اصلی",
     menuTextSize: "اندازهٔ متن",
@@ -218,6 +220,7 @@ const DICT = {
     secKeys: "AI 金鑰",
     hostedNotice: "本站已內建 AI 服務 — 不需要金鑰。只有想用自己的額度時才需要在下面填寫。",
     groqHintHosted: "選填。留空即使用本站內建服務。",
+    uiLangLabel: "介面語言",
     menuLabel: "顯示選項",
     menuSource: "顯示原文",
     menuTextSize: "文字大小",
@@ -246,9 +249,11 @@ const DICT = {
 };
 
 const UI_LANGS = [
-  { c: "en",  label: "EN" },
-  { c: "prs", label: "دری" },
-  { c: "zh",  label: "中文" },
+  // `label` is the compact trigger text; `name` is what the dropdown lists,
+  // because "EN" tells a first-time reader far less than "English".
+  { c: "en",  label: "EN",   name: "English" },
+  { c: "prs", label: "دری",  name: "دری" },
+  { c: "zh",  label: "中文", name: "中文" },
 ];
 const RTL_UI = new Set(["prs"]);
 
@@ -292,34 +297,76 @@ export function applyI18n(root = document) {
 }
 
 /**
- * Renders the EN / دری / 中文 switch into `el`.
+ * Interface-language control.
  *
- * All three segments side by side are 3 rows' worth of top bar on a 375px
- * phone, so on narrow screens CSS collapses this to the active language and
- * the first tap expands it. Desktop keeps the plain segmented control.
+ * `variant: "dropdown"` (the top bar) shows the current language and opens a
+ * popover listing the rest. The old behaviour expanded the segments inline,
+ * which grew the bar and shifted the layout on every tap — and the caret was
+ * promising a dropdown that did not exist.
+ *
+ * `variant: "inline"` keeps the plain segmented control, used inside the
+ * audience display menu where there is room and a nested popover would be odd.
  */
-export function mountUiSwitch(el) {
+export function mountUiSwitch(el, { variant = "dropdown" } = {}) {
   if (!el) return;
-  el.classList.add("collapsible");
-  const close = () => el.classList.remove("open");
+  if (variant === "inline") {
+    el.classList.add("collapsible");
+    const drawInline = () => {
+      el.innerHTML = UI_LANGS.map((l) =>
+        `<button class="uibtn ${l.c === cur ? "on" : ""}" data-ui="${l.c}">${l.label}</button>`).join("");
+      for (const b of el.querySelectorAll("[data-ui]")) {
+        b.onclick = () => { setUiLang(b.dataset.ui); drawInline(); };
+      }
+    };
+    drawInline();
+    return;
+  }
+
+  el.classList.add("uidrop");
+  const close = () => {
+    // Must hide the popover itself — removing the class only reset the caret,
+    // so Escape and outside clicks appeared to do nothing.
+    const menu = el.querySelector(".uidrop-menu");
+    if (menu) menu.hidden = true;
+    el.classList.remove("open");
+    const trigger = el.querySelector(".uidrop-trigger");
+    trigger && trigger.setAttribute("aria-expanded", "false");
+  };
+
   const draw = () => {
-    el.innerHTML = UI_LANGS.map((l) =>
-      `<button class="uibtn ${l.c === cur ? "on" : ""}" data-ui="${l.c}">${l.label}</button>`).join("");
-    for (const b of el.querySelectorAll("[data-ui]")) {
-      b.onclick = (ev) => {
-        // Only meaningful while collapsed; when expanded every segment is a choice.
-        const collapsed = getComputedStyle(el).getPropertyValue("--collapsible").trim() === "1";
-        if (collapsed && !el.classList.contains("open")) {
-          el.classList.add("open");
-          ev.stopPropagation();
-          return;
-        }
-        setUiLang(b.dataset.ui);
-        close();
-        draw();
-      };
+    const active = UI_LANGS.find((l) => l.c === cur) || UI_LANGS[0];
+    el.innerHTML =
+      `<button class="uidrop-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="${t("uiLangLabel")}">` +
+        `<span>${active.label}</span><span class="caret" aria-hidden="true">⌄</span>` +
+      `</button>` +
+      `<div class="uidrop-menu" role="listbox" hidden>` +
+        UI_LANGS.map((l) =>
+          `<button role="option" data-ui="${l.c}" aria-selected="${l.c === cur}"${l.c === "prs" ? ' lang="prs"' : ""}>` +
+            `<span>${l.name}</span><span class="tick" aria-hidden="true">✓</span>` +
+          `</button>`).join("") +
+      `</div>`;
+
+    const trigger = el.querySelector(".uidrop-trigger");
+    const menu = el.querySelector(".uidrop-menu");
+    trigger.onclick = (ev) => {
+      ev.stopPropagation();
+      const open = menu.hidden;
+      menu.hidden = !open;
+      el.classList.toggle("open", open);
+      trigger.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) (menu.querySelector('[aria-selected="true"]') || menu.firstElementChild).focus();
+    };
+    for (const b of menu.querySelectorAll("[data-ui]")) {
+      b.onclick = (ev) => { ev.stopPropagation(); setUiLang(b.dataset.ui); draw(); };
     }
   };
+
   draw();
   document.addEventListener("click", (e) => { if (!el.contains(e.target)) close(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !el.classList.contains("open")) return;
+    close();
+    const trigger = el.querySelector(".uidrop-trigger");
+    trigger && trigger.focus();
+  });
 }

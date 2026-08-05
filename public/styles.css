@@ -448,3 +448,35 @@ textarea.short{min-height:52px}
   color:var(--dim); font-size:12.5px; line-height:1.55;
 }
 .notice[hidden]{display:none}
+
+/* ── interface-language dropdown ──────────────────────────────────────
+   Replaces an inline expansion that grew the bar on every tap while
+   showing a caret that promised a popover. Same interaction model as the
+   audience "⋯" menu, so both surfaces behave alike. */
+.uidrop{position:relative; display:inline-flex; flex:none}
+.uidrop-trigger{
+  display:inline-flex; align-items:center; gap:5px;
+  height:var(--ctl); padding:0 11px;
+  background:var(--panel2); border:1px solid var(--line); border-radius:999px;
+  font-size:12.5px; font-weight:700; color:var(--fg); line-height:1; white-space:nowrap;
+}
+.uidrop-trigger .caret{font-size:10px; opacity:.7; transition:transform .15s}
+.uidrop.open .uidrop-trigger{border-color:var(--accent)}
+.uidrop.open .uidrop-trigger .caret{transform:rotate(180deg)}
+.uidrop-menu{
+  position:absolute; top:calc(100% + 8px); inset-inline-end:0; z-index:60;
+  min-width:172px; padding:6px;
+  background:var(--panel); border:1px solid var(--line); border-radius:13px;
+  box-shadow:0 16px 40px rgba(0,0,0,.55);
+}
+.uidrop-menu[hidden]{display:none}
+.uidrop-menu button{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  width:100%; min-height:42px; padding:8px 11px;
+  background:transparent; border:none; border-radius:9px;
+  font-size:14px; font-weight:600; color:var(--fg); text-align:start; white-space:nowrap;
+}
+.uidrop-menu button:hover{background:var(--panel2); border:none}
+.uidrop-menu .tick{color:var(--accent2); font-size:12px; opacity:0}
+.uidrop-menu button[aria-selected="true"] .tick{opacity:1}
+.uidrop-menu button[aria-selected="true"]{color:var(--accent)}
