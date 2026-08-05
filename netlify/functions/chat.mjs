@@ -42,7 +42,7 @@ export default async (req) => {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: `Bearer ${key}` },
       body: payload,
-    }));
+    }), "chat");
 
   if (error) return json({ error }, status);
   if (!res.ok) {

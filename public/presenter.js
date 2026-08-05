@@ -91,6 +91,26 @@ if (HOSTED) {
   $("groqHint").setAttribute("data-i18n", "groqHintHosted");
 }
 
+/* ── pre-flight quota ─────────────────────────────────────────────────
+   Answers "will I get through this service?" while there is still time to add
+   a key or drop a language. Deliberately NOT a live counter: during a session
+   the number moves on its own and the only useful response — rotating keys —
+   is already automatic, so a ticking gauge would be anxiety with no action. */
+async function showQuota() {
+  const el = $("quotaHint");
+  if (!el || !HOSTED) return;                 // BYOK: the browser never sees the pool
+  try {
+    const q = await (await fetch("/api/quota")).json();
+    if (!q || typeof q.hours !== "number") return;
+    const h = q.hours;
+    // ~2h covers a long service; below that the operator needs to know now.
+    el.className = h < 2 ? "hint warn" : "hint";
+    el.textContent = h < 2 ? t("quotaLow", h) : t("quotaOk", h, q.keys);
+    // A cold function has no observations yet — say so rather than imply precision.
+    if (!q.measured) el.textContent += " " + t("quotaEstimate");
+  } catch { /* the pill and banner already report an unreachable relay */ }
+}
+
 /** Every Groq key the operator has given us, primary first, de-duplicated. */
 function groqPool() {
   const extra = $("groqKeys2").value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
@@ -487,3 +507,4 @@ window.addEventListener("beforeunload", (e) => {
 // Runs last on purpose: it touches `doc`, `publisher` and `schedulePush`, all of
 // which are declared below the language-picker setup where this used to sit.
 announceIdle();
+showQuota();   // pre-flight only: never polled, never shown mid-session

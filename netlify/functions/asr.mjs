@@ -46,7 +46,7 @@ export default async (req) => {
   };
 
   const { res, error, status } = await withKeys((key) =>
-    fetch(GROQ, { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: build() }));
+    fetch(GROQ, { method: "POST", headers: { Authorization: `Bearer ${key}` }, body: build() }), "asr");
 
   if (error) return json({ error }, status);
   if (!res.ok) {
