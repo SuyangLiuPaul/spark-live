@@ -72,6 +72,9 @@ for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "gemin
   el.addEventListener("blur", () => LS.set(id, el.value));
 }
 
+/** True when the site carries a server-side key pool (hosted, no key entry). */
+const HOSTED = !!CFG.proxy;
+
 /** Every Groq key the operator has given us, primary first, de-duplicated. */
 function groqPool() {
   const extra = $("groqKeys2").value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
@@ -83,9 +86,12 @@ function readiness() {
   const have = ["groqKey", "geminiKey", "kimiKey", "glmKey"].filter((k) => $(k).value.trim());
   const names = { groqKey: "Groq", geminiKey: "Gemini", kimiKey: "Kimi", glmKey: "GLM" };
   const hint = $("readyHint");
-  if (!$("groqKey").value.trim()) {
+  if (HOSTED && !$("groqKey").value.trim()) {
+    hint.textContent = t("readyHosted");
+  } else if (!$("groqKey").value.trim()) {
+    // Left closed on purpose — the hint says where to go, and force-opening a
+    // long settings panel on every load buries the Start button.
     hint.textContent = t("needGroq");
-    $("advPanel").open = true;
   } else {
     const n = groqPool().length;
     hint.textContent = t("ready", have.map((k) => names[k]).join(" → ")) +
@@ -217,9 +223,19 @@ $("testBtn").onclick = async () => {
     ["glmKey",    "GLM",    (k) => fetch("https://api.z.ai/api/coding/paas/v4/models", { headers: { Authorization: `Bearer ${k}` } })],
   ];
 
-  const out = [pool.length
+  const out = [];
+  if (HOSTED) {
+    try {
+      const r = await fetch("/api/chat", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "ping", sys: "Reply {\"ok\":1}" }),
+      });
+      out.push(`Hosted ${r.ok ? "✓" : "✗" + r.status}`);
+    } catch { out.push("Hosted ✗net"); }
+  }
+  out.push(pool.length
     ? `Groq ${okCount}/${pool.length} ${okCount === pool.length ? "✓" : "✗"}`
-    : "Groq —"];
+    : "Groq —");
   for (const [id, label, run] of probes) {
     const key = $(id).value.trim();
     if (!key) continue;
@@ -238,11 +254,15 @@ $("testBtn").onclick = async () => {
 /* ── start / stop ── */
 $("startBtn").onclick = async () => {
   const groqKeys = groqPool();
-  if (!groqKeys.length) { $("setupMsg").textContent = t("noGroq"); return; }
+  // Hosted deployments need no key: the proxy holds the pool server-side. A key
+  // typed here still wins, so a presenter can spend their own quota if they want.
+  const useProxy = HOSTED && !groqKeys.length;
+  if (!useProxy && !groqKeys.length) { $("setupMsg").textContent = t("noGroq"); return; }
 
   // Fast-and-good first, reliable-but-slow last. Only configured keys join.
   // The groq step gets no `key`: the engine hands it the rotating pool.
   const llmChain = [
+    ...(useProxy ? [{ id: "proxy" }] : []),
     { id: "groq",   key: groqKeys[0] },
     { id: "gemini", key: $("geminiKey").value.trim() },
     { id: "kimi",   key: $("kimiKey").value.trim() },
@@ -250,7 +270,7 @@ $("startBtn").onclick = async () => {
   ].filter((s) => s.key);
 
   engine = new LiveEngine({
-    groqKey: groqKeys[0], groqKeys, llmChain, targets,
+    groqKey: groqKeys[0], groqKeys, proxy: useProxy, llmChain, targets,
     language: $("lang").value,
     glossary: $("glossary").value.trim(),
     context: $("context").value.trim(),
@@ -285,6 +305,7 @@ $("startBtn").onclick = async () => {
   $("livePanel").style.display = "";
   $("dot").className = "dot on";
   $("statePill").textContent = t("stateLive");
+  $("statePill").className = "pill live";
   showErr("");
 };
 
@@ -298,6 +319,7 @@ $("stopBtn").onclick = async () => {
   try { await publisher.push(doc); } catch {}
   $("dot").className = "dot";
   $("statePill").textContent = t("stateEnded");
+  $("statePill").className = "pill ended";
   $("statMsg").textContent = t("endedMsg");
   $("stopBtn").style.display = "none";
   $("newBtn").style.display = "";

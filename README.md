@@ -107,11 +107,23 @@ npm install
 netlify deploy --prod --dir=public --functions=netlify/functions
 ```
 
-### Bring your own keys
+### Two ways to supply keys
 
-Keys are entered in the app and stored in `localStorage` **on the presenter's device
-only**. They are never sent to the relay and never leave the browser except to the AI
-provider itself.
+**Hosted** — set `GROQ_KEY_POOL` (comma-separated) as a Netlify environment variable.
+The browser then calls `/api/asr` and `/api/chat`, which add a key server-side, and
+the site works with **no setup for the presenter at all**. The key never reaches the
+browser. Enable it by shipping `window.SPARK_LIVE_CONFIG = { proxy: true }`.
+
+> There is no way to put a key *in* a browser app and hide it — anything the page can
+> use, a visitor can read from DevTools. A proxy is the only real answer.
+
+Optionally set `SPARK_ACCESS_CODE` to gate the proxy; callers then need that code.
+Leave it unset and the endpoints are open — with a free-tier pool the worst case is a
+drained daily quota rather than a bill, but set it if the URL travels.
+
+**Bring your own key** — keys entered in the app are stored in `localStorage` **on the
+presenter's device only**. They are never sent to the relay and never leave the browser
+except to the AI provider itself. A key entered here overrides the hosted pool.
 
 - **Groq** — required. Powers both speech recognition and translation.
 - Gemini / Kimi / GLM — optional fallbacks, used only if the primary is rate-limited.
@@ -124,11 +136,10 @@ They are **round-robined**, so every key stays comfortably inside its own quota
 instead of one being driven into a `429`; any key that does get throttled is
 benched for its `retry-after` and skipped until it recovers.
 
-> For an unattended kiosk you can drop a `public/config.js` defining
-> `window.SPARK_LIVE_CONFIG = { groqKey: "…" }` to pre-fill the fields.
-> **That file is gitignored and would be publicly readable on a deployed site** —
-> only do this on a URL you control, and rotate the key afterwards. For anything
-> public, put the keys behind a serverless proxy instead.
+> A `public/config.js` defining `window.SPARK_LIVE_CONFIG = { groqKey: "…" }` will
+> pre-fill the fields, which is handy for a private test rig. It is gitignored, but
+> **anything in it is publicly readable on a deployed site** — use hosted mode above
+> for anything real.
 
 ---
 
@@ -149,7 +160,7 @@ websocket service means rewriting that one file.
 token; a different device publishing to the same code gets `409`. The token is
 stripped before anything reaches viewers.
 
-**Rate limits shape the design.** Token-per-minute caps, not price, are the real
+**Rate limits shape the design.** Per-key daily request caps, not price, are the real
 constraint on a long talk. Each extra target language multiplies output tokens, so
 the picker caps at three and warns. The provider chain falls back automatically from
 a high-quality model to a high-throughput one.
@@ -170,7 +181,10 @@ live/
 │  └─ i18n.js         interface language (EN · دری · 中文)
 └─ netlify/functions/
    ├─ publish.mjs     presenter → store
-   └─ feed.mjs        audience ← store
+   ├─ feed.mjs        audience ← store
+   ├─ keys.mjs        server-side key pool + rotation (shared helper)
+   ├─ asr.mjs         /api/asr  — speech proxy, keys never reach the browser
+   └─ chat.mjs        /api/chat — correct+translate proxy
 ```
 
 ## Interface vs content languages

@@ -171,6 +171,39 @@ class Agreement {
   pendingText() { return this.prev.map((w) => w.w).join(" ").replace(/\s+([,.!?，。！？])/g, "$1").trim(); }
 }
 
+/* ────────────────────────── hosted proxy ────────────────────────── */
+
+/**
+ * When the site is deployed with a server-side key pool, the browser talks to
+ * our own functions instead of Groq and never holds a key. Keys in the browser
+ * are readable by whoever opens DevTools, so "hosted and ready to use" and
+ * "keys in config.js" are mutually exclusive — this is the honest version.
+ */
+const PROXY_ASR = "/api/asr";
+const PROXY_CHAT = "/api/chat";
+
+function accessHeaders() {
+  const code = (typeof window !== "undefined" && window.SPARK_LIVE_CONFIG?.accessCode) || "";
+  return code ? { "x-spark-access": code } : {};
+}
+
+async function proxyFetch(url, init) {
+  const res = await fetch(url, { ...init, headers: { ...(init.headers || {}), ...accessHeaders() } });
+  if (!res.ok) {
+    let msg = `${res.status}`;
+    try {
+      const j = await res.json();
+      msg = j.error === "not_configured" ? "server has no key pool configured"
+          : j.error === "bad_access_code" ? "access code rejected"
+          : `${j.error || res.status}${j.status ? " " + j.status : ""}`;
+    } catch {}
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
 /* ────────────────────────── key pool ────────────────────────── */
 
 /**
@@ -209,7 +242,14 @@ export class KeyPool {
 
 /* ─────────────────────────── ASR ─────────────────────────── */
 
-async function transcribeGroq({ blob, pool, model, language, signal }) {
+async function transcribeGroq({ blob, pool, model, language, signal, proxy }) {
+  if (proxy) {
+    const fd = new FormData();
+    fd.append("file", blob, "chunk.wav");
+    fd.append("model", model || "whisper-large-v3");
+    if (language && language !== "auto") fd.append("language", language);
+    return shapeAsr(await proxyFetch(PROXY_ASR, { method: "POST", body: fd, signal }));
+  }
   let lastErr = null;
   // One attempt per key: a 429 on this key just means try the next one.
   for (let attempt = 0; attempt < Math.max(1, pool.size); attempt++) {
@@ -247,8 +287,11 @@ async function transcribeOnce({ blob, key, model, language, signal }) {
     err.retryAfter = res.headers.get("retry-after");
     throw err;
   }
-  const data = await res.json();
+  return shapeAsr(await res.json());
+}
 
+/** Groq's verbose_json -> the word list the stabiliser expects. */
+function shapeAsr(data) {
   let words = [];
   if (Array.isArray(data.words) && data.words.length) {
     words = data.words.map((w) => ({ w: w.word, start: +w.start || 0, end: +w.end || 0 }));
@@ -382,6 +425,7 @@ async function askOpenAICompat({ key, base, model, prompt, sys, signal }) {
  * Order = fast-and-good first, reliable-but-slow last.
  */
 export const LLM_PROVIDERS = {
+  proxy:  { label: "Hosted (no key needed)", kind: "proxy", model: "openai/gpt-oss-120b" },
   groq:   { label: "Groq · gpt-oss-120b", kind: "openai", base: "https://api.groq.com/openai/v1", model: "openai/gpt-oss-120b" },
   // Same key, 70k TPM vs 8k — the escape hatch when a long service out-paces
   // gpt-oss-120b's token budget. Measured 3.2 s, Dari quality comparable.
@@ -396,12 +440,17 @@ async function askChain(chain, prompt, sys) {
   const errors = [];
   for (const step of chain) {
     const def = LLM_PROVIDERS[step.id];
-    if (!def || !(step.key || (step.pool && step.pool.size))) continue;
+    if (!def || !(def.kind === "proxy" || step.key || (step.pool && step.pool.size))) continue;
     const tries = step.pool ? Math.max(1, step.pool.size) : 1;
     for (let a = 0; a < tries; a++) {
       const key = step.pool ? step.pool.next() : step.key;
       try {
-        const raw = def.kind === "gemini"
+        const raw = def.kind === "proxy"
+          ? (await proxyFetch(PROXY_CHAT, {
+              method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ sys, prompt, model: step.model || def.model }),
+            })).content
+          : def.kind === "gemini"
           ? await askGemini({ key, model: step.model || def.model, prompt, sys })
           : await askOpenAICompat({ key, base: step.base || def.base, model: step.model || def.model, prompt, sys });
         if (raw && raw.trim()) return { raw, via: step.id };
@@ -433,7 +482,7 @@ export class LiveEngine {
       // large-v3 over turbo: measured on real sermon audio it fixed a homophone
       // (當日→當然), avoided a garbled run, and ADDS PUNCTUATION (which the
       // sentence splitter below depends on) for ~0.1 s more on a 25 s window.
-      groqKey: "", groqKeys: [], groqModel: "whisper-large-v3", language: "auto",
+      groqKey: "", groqKeys: [], proxy: false, groqModel: "whisper-large-v3", language: "auto",
       llmChain: [],            // ordered [{id, key, model?, base?}]; groq steps get the pool
       targets: ["prs"],        // audience languages, first = primary
       interim: true,           // cheap provisional translation of the live tail
@@ -470,7 +519,7 @@ export class LiveEngine {
     for (const step of this.cfg.llmChain || []) {
       if ((step.id === "groq" || step.id === "groqHi") && !step.pool && chatPool.size) step.pool = chatPool;
     }
-    if (!this.pool.size) throw new Error("missing_asr_key");
+    if (!this.cfg.proxy && !this.pool.size) throw new Error("missing_asr_key");
     if (!this.cfg.llmChain || !this.cfg.llmChain.length) throw new Error("missing_llm_key");
 
     this.cap = new Capture((chunk, rate) => this._audio(chunk, rate));
@@ -541,7 +590,8 @@ export class LiveEngine {
       const wav = encodeWav(pcm, 16000);
       this.asrCalls = (this.asrCalls || 0) + 1;
       const { words } = await transcribeGroq({
-        blob: wav, pool: this.pool, model: this.cfg.groqModel, language: this.cfg.language,
+        blob: wav, pool: this.pool, proxy: this.cfg.proxy,
+        model: this.cfg.groqModel, language: this.cfg.language,
       });
 
       const { stable, cut } = this.agree.push(words);
@@ -583,14 +633,20 @@ export class LiveEngine {
 
     const step = (this.cfg.llmChain || [])[0];
     if (!step) return;
+    const viaProxy = step.id === "proxy";
     const ikey = step.pool ? step.pool.next() : step.key;
-    if (!ikey) return;
+    if (!viaProxy && !ikey) return;
     this._interimBusy = true; this._interimAt = now; this._interimSrc = tail;
     const primary = this.cfg.targets[0];
     const sys = `Translate the fragment into ${(LANGS[primary] || {}).note || primary}
 It is an INCOMPLETE live utterance — translate what is there, do not invent an ending.
 Reply with JSON only: {"t":"..."}`;
-    askOpenAICompat({ key: ikey, base: LLM_PROVIDERS.groq.base, model: INTERIM_MODEL, prompt: tail, sys })
+    (viaProxy
+      ? proxyFetch(PROXY_CHAT, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sys, prompt: tail, model: INTERIM_MODEL }),
+        }).then((r) => r.content)
+      : askOpenAICompat({ key: ikey, base: LLM_PROVIDERS.groq.base, model: INTERIM_MODEL, prompt: tail, sys }))
       .then((raw) => { const o = parseJson(raw) || {}; if (o.t) this.on.interim(String(o.t).trim()); })
       .catch(() => {})
       .finally(() => { this._interimBusy = false; });

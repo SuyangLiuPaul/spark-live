@@ -55,6 +55,10 @@ const DICT = {
     notFound: "Session not found",
     checkCode: "Check the code",
     missingCode: "Missing session code",
+    readyHosted: "Ready — no setup needed. Press Start and allow the microphone.",
+    footTag: "Live transcription & translation",
+    footAsk: "Questions or feedback? Contact Paul",
+    footPriv: "Your API keys are stored on this device only and are never sent to our servers.",
   },
   prs: {
     stateIdle: "شروع نشده", stateLive: "زنده", stateEnded: "پایان یافت",
@@ -102,6 +106,10 @@ const DICT = {
     notFound: "جلسه پیدا نشد",
     checkCode: "کد را بررسی کنید",
     missingCode: "کد جلسه موجود نیست",
+    readyHosted: "آماده — نیازی به تنظیم نیست. شروع را بزنید و به مایکروفون اجازه دهید.",
+    footTag: "ترجمه و رونویسی زنده",
+    footAsk: "سوال یا نظر دارید؟ با پاول در تماس شوید",
+    footPriv: "کلیدهای API فقط روی همین دستگاه ذخیره می‌شوند و هرگز به سرور ما فرستاده نمی‌شوند.",
   },
   zh: {
     stateIdle: "未開始", stateLive: "直播中", stateEnded: "已結束",
@@ -149,6 +157,10 @@ const DICT = {
     notFound: "找不到場次",
     checkCode: "請確認代碼",
     missingCode: "缺少場次代碼",
+    readyHosted: "已就緒 — 免設定。按開始並允許麥克風權限即可。",
+    footTag: "即時聽打與翻譯",
+    footAsk: "有問題或建議？聯絡 Paul",
+    footPriv: "您的 API 金鑰只存在這台裝置上，不會傳送到我們的伺服器。",
   },
 };
 

@@ -2,8 +2,9 @@
 
 ## Environments
 - **Production** — a Netlify site, deployed from a staged copy that **excludes**
-  `public/config.js` and substitutes an empty `window.SPARK_LIVE_CONFIG = {}`, so
-  no API key is ever served publicly. Users bring their own key (BYOK).
+  `public/config.js` and substitutes `window.SPARK_LIVE_CONFIG = { proxy: true }`,
+  so no API key is ever served publicly. Keys live in a Netlify env var and are
+  added server-side by the proxies — the site works with no presenter setup.
   (Serving nothing at all is worse than the stub: `/config.js` then falls through
   to the SPA rewrite and hands `index.html` to a `<script>` tag.)
 - **Dev** — separate Netlify site, deployed WITH `config.js` pre-filled for testing.
@@ -14,6 +15,24 @@
 - **Public repo** — `SuyangLiuPaul/spark-live` (MIT). Audited by cloning the pushed
   tree: 0 key patterns, 0 tokens, `config.js` untracked, 0 deployment URLs in docs,
   and 0 secret matches across the whole git history.
+
+### Hosted mode (prod): keys server-side
+`GROQ_KEY_POOL` is a Netlify **env var on the prod site**, read only by
+`netlify/functions/keys.mjs`. Prod ships `config.js` = `{ proxy: true }`, which
+routes the client to `/api/asr` + `/api/chat` instead of Groq. Verified: 0 key
+patterns reachable from the browser, and the endpoints answer with no client key.
+
+Rotation server-side differs from the client's: a function invocation is
+stateless, so there is no counter to advance — `keys.mjs` shuffles the pool per
+request (Fisher-Yates) and fails over within the invocation on 429/5xx.
+
+Both proxies whitelist the model, so a stray caller can't spend the pool on
+something expensive. `SPARK_ACCESS_CODE` (unset = open) gates them if needed.
+
+**Setting the env var: use the API, not the CLI.** `netlify env:set --site=<id>`
+resolved the project from the *working directory's* `.netlify/state.json` and
+wrote to the dev site despite the explicit flag. `POST /api/v1/accounts/<slug>/env?site_id=<id>`
+is unambiguous. Omit `scopes` — specifying it 403s on this plan.
 
 ### Deploy prod (never `--dir=public` directly — that ships config.js)
 ```bash
@@ -26,7 +45,6 @@ Live transcription + **Dari (دری)** translation shown to an audience on their
 phones. Separate from the main Spark Transcribe app (which is batch: upload →
 local Whisper → PDF). Deployed **standalone** so it can never disturb production.
 
-- Dev site: **<your-netlify-site>** — site id the supplied key
 - Presenter console: `/`   ·   Audience: `/join/<CODE>` (or `/view.html?s=<CODE>`)
 - Deploy: `cd live && netlify deploy --prod --dir=public --functions=netlify/functions --site=<site-id>…`
 

@@ -1,4 +1,5 @@
 :root{
+  --ctl:30px;            /* shared height for pill-shaped bar controls */
   --bg:#0b0f17; --panel:#141b28; --panel2:#1b2434; --line:#26324a;
   --fg:#e8eef8; --dim:#93a3bd; --faint:#5f708c;
   --accent:#57c9ff; --accent2:#7dffb0; --warn:#ffc65c; --bad:#ff7a6a;
@@ -20,8 +21,11 @@ h1{font-size:20px;font-weight:800;letter-spacing:.02em}
 h2{font-size:13px;font-weight:700;color:var(--dim);letter-spacing:.14em;text-transform:uppercase;margin-bottom:10px}
 .sub{color:var(--dim);font-size:13px}
 
-.topbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.topbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px;min-height:34px}
 .brand{display:flex;align-items:center;gap:9px}
+/* h1 and the status pill are different type sizes, so equal line boxes are what
+   actually make them look aligned — centring alone leaves the pill sitting low. */
+.brand h1{line-height:1.2}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--faint);flex:none}
 .dot.on{background:var(--accent2);box-shadow:0 0 12px var(--accent2)}
 .dot.bad{background:var(--bad)}
@@ -73,7 +77,13 @@ button:disabled{opacity:.45;cursor:not-allowed}
 
 .draft{color:var(--faint);font-style:italic;min-height:22px;font-size:14px;margin-top:8px}
 .err{color:var(--bad);font-size:12px;margin-top:8px;word-break:break-word}
-.pill{font-size:11.5px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:4px 10px}
+.pill{
+  display:inline-flex; align-items:center; height:var(--ctl); padding:0 12px;
+  font-size:11.5px; font-weight:600; color:var(--dim);
+  border:1px solid var(--line); border-radius:999px; line-height:1; white-space:nowrap;
+}
+.pill.live{color:var(--accent2); border-color:rgba(125,255,176,.35); background:rgba(125,255,176,.08)}
+.pill.ended{color:var(--faint)}
 
 /* ── audience view ── */
 .stage{min-height:100vh;display:flex;flex-direction:column;padding:0}
@@ -117,15 +127,27 @@ details.adv > *:last-child{margin-bottom:16px}
 
 /* ── target-language picker ── */
 .langpick{display:flex;flex-wrap:wrap;gap:7px}
-.langpick button{padding:8px 14px;font-size:13px;border-radius:999px;font-weight:600;color:var(--dim)}
+.langpick button{
+  display:inline-flex; align-items:center; justify-content:center;
+  height:38px; padding:0 14px; font-size:13px; border-radius:999px;
+  font-weight:600; color:var(--dim); line-height:1;
+}
+/* The tick is always in the box, just invisible when off. Revealing it on
+   selection used to add ~2px of line box and a few px of width, so every
+   toggle nudged the whole wrapped grid. Reserving the space fixes both. */
+.langpick button::before{
+  content:"✓"; display:inline-block; width:1em; margin-right:5px;
+  font-size:11px; text-align:center; opacity:0; transition:opacity .15s;
+}
+.langpick button.on::before{opacity:1}
 .langpick button.on{color:#04121f;background:linear-gradient(180deg,#7dffb0,#2fc088);border-color:transparent}
-.langpick button.on::before{content:"✓ "}
 
 /* ── UI language switch ── */
-.uisel{display:flex;gap:3px;background:var(--panel2);border:1px solid var(--line);
-  border-radius:999px;padding:3px;margin-left:10px}
-.uisel .uibtn{border:none;background:transparent;border-radius:999px;
-  padding:6px 12px;font-size:12.5px;font-weight:700;color:var(--dim)}
+.uisel{display:inline-flex;gap:2px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:999px;padding:2px;margin-left:10px}
+.uisel .uibtn{display:inline-flex;align-items:center;justify-content:center;
+  border:none;background:transparent;border-radius:999px;height:calc(var(--ctl) - 6px);
+  padding:0 11px;font-size:12.5px;font-weight:700;color:var(--dim);line-height:1}
 .uisel .uibtn.on{background:linear-gradient(180deg,#4fc4ff,#2a86d8);color:#04121f}
 .uisel .uibtn:hover{border:none;color:var(--fg)}
 
@@ -158,13 +180,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Naskh 
 input, textarea, select, .codeinput { max-width: 100%; box-sizing: border-box; }
 
 .codeinput{
-  width: 100%; min-width: 0;
+  /* Sized to its content (12 chars max) rather than stretching the full panel —
+     a 6-character code in a 960px box read as a broken input. */
+  width: 100%; max-width: 9.5em; min-width: 0;
   font-size: clamp(22px, 7vw, 30px);
   letter-spacing: clamp(.10em, 3vw, .22em);
+  text-align: center;
 }
+.ui-rtl .codeinput{ margin-left:auto }
 #joinUrl { overflow-wrap: anywhere; }
 
 .joinbox { align-items: flex-start; }
+.joinbox > div:last-child { display:flex; flex-direction:column; align-items:flex-start; }
 .joinbox > div:last-child { flex: 1 1 240px; }
 .qr img, .qr canvas { width: clamp(96px, 28vw, 120px); height: clamp(96px, 28vw, 120px); }
 
@@ -206,4 +233,50 @@ textarea.secret {
   text-security: disc;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   letter-spacing: .04em;
+}
+
+/* ── site footer ───────────────────────────────────────────────────────
+   Deliberately quiet: it sits under a working tool, so it identifies the
+   product and offers a contact route without competing with the content. */
+.sitefoot{
+  margin-top:34px; padding-top:20px; border-top:1px solid var(--line);
+  color:var(--faint); font-size:12.5px;
+}
+.footinner{
+  display:flex; align-items:center; gap:18px 24px; flex-wrap:wrap;
+  justify-content:space-between;
+}
+.footbrand{display:flex; align-items:center; gap:11px; min-width:0}
+.footbrand img{border-radius:7px; opacity:.9; flex:none}
+.footbrand strong{
+  display:block; color:var(--dim); font-size:13px;
+  font-weight:700; letter-spacing:.02em; line-height:1.3;
+}
+.footbrand span{display:block; font-size:11.5px; color:var(--faint); line-height:1.4}
+.footcontact{display:flex; align-items:center; gap:7px; flex-wrap:wrap; min-width:0}
+.sitefoot a{
+  color:var(--accent); text-decoration:none;
+  border-bottom:1px solid transparent; transition:.15s; word-break:break-word;
+}
+.sitefoot a:hover{border-bottom-color:var(--accent)}
+.footlegal{
+  margin-top:16px; padding-top:14px; border-top:1px solid var(--line);
+  display:flex; gap:8px 18px; flex-wrap:wrap; justify-content:space-between;
+  font-size:11.5px; color:var(--faint);
+}
+
+/* Audience view: one quiet line, so it never competes with the transcript. */
+.stagefoot{
+  flex:none; padding:10px 16px calc(10px + env(safe-area-inset-bottom));
+  border-top:1px solid var(--line); background:rgba(11,15,23,.92);
+  display:flex; align-items:center; gap:6px 14px; flex-wrap:wrap;
+  justify-content:center; font-size:11.5px; color:var(--faint); text-align:center;
+}
+.stagefoot a{color:var(--accent); text-decoration:none}
+.stagefoot a:hover{text-decoration:underline}
+.stagefoot .sep{opacity:.45}
+@media(max-width:520px){
+  .footinner{gap:14px}
+  .stagefoot .sep{display:none}
+  .stagefoot{flex-direction:column; gap:3px}
 }
