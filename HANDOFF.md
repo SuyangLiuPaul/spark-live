@@ -188,6 +188,29 @@ Consequences baked into the design:
 
 These are **daily** buckets and do not reset between services.
 
+## Staying alive through a long service (`public/resilience.js`)
+Failures here all happen mid-service, in front of a room, to someone who
+cannot debug them:
+- **Screen wake lock**, presenter *and* audience. A phone sleeps in ~30 s,
+  which ends the presenter's session and makes the audience unlock to read.
+  The OS drops the lock whenever the page hides, so it is re-acquired on every
+  `visibilitychange` — requesting it once is the usual bug.
+- **The tick is driven by audio, not only `setInterval`.** Background tabs
+  throttle timers to ~1/min, which would silently stall a live session the
+  moment the presenter checks a message. The AudioWorklet keeps delivering
+  while hidden, so audio is the reliable clock.
+- **Audio stall watchdog** — a Bluetooth mic dropping used to leave the UI
+  saying "Live" while nothing was captured. 5 s without audio raises it.
+- **Connection state** reports real request outcomes, not just
+  `navigator.onLine`, and only trips after 3 consecutive failures.
+- **Actionable errors** — `NotAllowedError` etc. become sentences telling the
+  presenter what to do; exhausted keys say so explicitly.
+
+**`requestAnimationFrame` never fires in a hidden tab.** Anything that must be
+correct on first paint (measuring overflow, setting a class) has to be
+synchronous, or a page opened in a background tab renders wrong and stays wrong
+until something resizes. Same class of bug as the `setInterval` throttling.
+
 ## Gotchas (each cost a real debugging cycle)
 - **`/join/:code` is a 200 rewrite, not a redirect.** The browser URL keeps the
   path and carries **no query string** → assets must use **absolute** paths

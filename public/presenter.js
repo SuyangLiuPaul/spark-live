@@ -1,6 +1,7 @@
 import { LiveEngine, LANGS } from "./engine.js";
 import { t, applyI18n, mountUiSwitch } from "./i18n.js";
 import { createPublisher } from "./channel.js";
+import { createWakeLock, createConnection, createToast, micErrorMessage } from "./resilience.js";
 
 const $ = (id) => document.getElementById(id);
 const LS = {
@@ -53,6 +54,7 @@ $("code").addEventListener("change", async () => {
 $("copyBtn").onclick = async () => {
   try { await navigator.clipboard.writeText(joinUrl); $("copyBtn").textContent = t("copied"); }
   catch { $("copyBtn").textContent = t("copyManual"); }
+  toast(t("copied"));
   setTimeout(() => ($("copyBtn").textContent = t("copyLink")), 1600);
 };
 $("openBtn").onclick = () => window.open(`./view.html?s=${session}`, "_blank");
@@ -127,9 +129,27 @@ function renderLangPick() {
       }
     };
   }
+  syncLangScrollHint();
   const names = targets.map((c) => LANGS[c].en).join(" · ");
   $("langHint").textContent = targets.length >= 3 ? t("langWarn", names) : t("langNote", names);
 }
+/* Only fade the bottom edge when the list actually scrolls — a short list
+   would otherwise have its last row faded for no reason. Re-checked on resize
+   and rotation, since whether it overflows depends entirely on width. */
+function syncLangScrollHint() {
+  const lp = $("langpick");
+  if (!lp) return;
+  // Measured synchronously on purpose: requestAnimationFrame never fires in a
+  // hidden tab, so a page opened in the background would render without the
+  // hint and stay wrong until something resized. Reading scrollHeight forces
+  // the layout we need anyway.
+  lp.classList.toggle("scrollable", lp.scrollHeight > lp.clientHeight + 1);
+}
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(syncLangScrollHint).observe($("langpick"));
+}
+window.addEventListener("orientationchange", syncLangScrollHint);
+
 mountUiSwitch($("uiSwitch"));
 applyI18n();
 renderLangPick();
@@ -157,6 +177,17 @@ window.addEventListener("ui:lang", () => {
   if (doc.lines.length) renderLines();
 });
 
+/* ── resilience ── */
+const wake = createWakeLock();
+const toast = createToast();
+const conn = createConnection({
+  onChange: ({ online }) => {
+    document.body.classList.toggle("offline", !online);
+    if (!online) toast(t("offline"), "bad");
+    else if (engine && engine.running) toast(t("backOnline"), "ok");
+  },
+});
+
 /* ── state ── */
 const doc = {
   v: 0, title: "", live: false, ended: false, draft: "", interim: "",
@@ -173,7 +204,7 @@ function schedulePush() {
     pushTimer = null;
     doc.v += 1;
     try { await publisher.push(doc); }
-    catch (e) { showErr(t("publishFail") + e.message); }
+    catch (e) { conn.report(false); showErr(t("publishFail") + e.message); }
   }, 400);
 }
 
@@ -286,7 +317,13 @@ $("startBtn").onclick = async () => {
     level: (v) => { $("meterBar").style.width = Math.round(v * 100) + "%"; },
     draft: (t) => { doc.draft = t || ""; renderDraft(); schedulePush(); },
     interim: (t) => { doc.interim = t || ""; renderDraft(); schedulePush(); },
-    error: (e) => showErr(String(e && e.message ? e.message : e)),
+    error: (e) => {
+      const msg = String(e && e.message ? e.message : e);
+      if (msg === "audio_stalled") { showErr(t("micStalled")); toast(t("micStalled"), "bad"); return; }
+      if (e && e.exhausted) { showErr(t("quotaOut")); toast(t("quotaOut"), "bad"); return; }
+      showErr(msg);
+    },
+    status: (s) => { $("dot").classList.toggle("bad", !!s.stalled); },
     line: (l) => {
       const i = doc.lines.findIndex((x) => x.id === l.id);
       if (i >= 0) doc.lines[i] = l; else doc.lines.push(l);
@@ -299,9 +336,14 @@ $("startBtn").onclick = async () => {
   try {
     await engine.start();
   } catch (e) {
-    $("setupMsg").textContent = t("cantStart") + (e.message === "missing_asr_key" ? t("noGroq") : e.message);
+    const why = e.message === "missing_asr_key" ? t("noGroq") : micErrorMessage(e, t);
+    $("setupMsg").textContent = t("cantStart") + why;
+    toast(why, "bad");
     return;
   }
+
+  // A sleeping screen ends the session; hold the lock for as long as we're live.
+  wake.on();
 
   doc.title = $("title").value.trim() || "Spark Live";
   doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
@@ -321,10 +363,11 @@ $("stopBtn").onclick = async () => {
   if (!engine) return;
   $("statMsg").textContent = t("wrapUp");
   engine.stop();
+  wake.off();
   await engine.drain();
   doc.live = false; doc.ended = true; doc.draft = "";
   doc.v += 1;
-  try { await publisher.push(doc); } catch {}
+  try { await publisher.push(doc); conn.report(true); } catch { conn.report(false); }
   $("dot").className = "dot";
   $("statePill").textContent = t("stateEnded");
   $("statePill").className = "pill ended";

@@ -56,6 +56,14 @@ const DICT = {
     checkCode: "Check the code",
     missingCode: "Missing session code",
     readyHosted: "Ready — no setup needed. Press Start and allow the microphone.",
+    offline: "No connection — trying to reconnect…",
+    backOnline: "Back online ✓",
+    reconnecting: "Reconnecting…",
+    micDenied: "Microphone blocked. Allow it in your browser's address-bar icon, then press Start again.",
+    micNotFound: "No microphone found. Plug one in or pick another input, then press Start again.",
+    micBusy: "The microphone is in use by another app. Close it, then press Start again.",
+    micStalled: "Microphone stopped sending audio — check the cable or Bluetooth connection.",
+    quotaOut: "All keys have hit today's limit. Add another key in Advanced, or continue tomorrow.",
     footTag: "Live transcription & translation",
     footAsk: "Questions or feedback? Contact Paul",
     footPriv: "Your API keys are stored on this device only and are never sent to our servers.",
@@ -107,6 +115,14 @@ const DICT = {
     checkCode: "کد را بررسی کنید",
     missingCode: "کد جلسه موجود نیست",
     readyHosted: "آماده — نیازی به تنظیم نیست. شروع را بزنید و به مایکروفون اجازه دهید.",
+    offline: "ارتباط قطع شد — در حال تلاش برای وصل دوباره…",
+    backOnline: "دوباره وصل شد ✓",
+    reconnecting: "در حال وصل دوباره…",
+    micDenied: "مایکروفون مسدود است. از نوار آدرس اجازه دهید و دوباره شروع را بزنید.",
+    micNotFound: "مایکروفون پیدا نشد. یکی وصل کنید و دوباره شروع را بزنید.",
+    micBusy: "مایکروفون توسط برنامهٔ دیگری استفاده می‌شود. آن را ببندید و دوباره تلاش کنید.",
+    micStalled: "مایکروفون صدا نمی‌فرستد — کیبل یا اتصال بلوتوث را بررسی کنید.",
+    quotaOut: "همهٔ کلیدها به سقف امروز رسیدند. کلید دیگری اضافه کنید یا فردا ادامه دهید.",
     footTag: "ترجمه و رونویسی زنده",
     footAsk: "سوال یا نظر دارید؟ با پاول در تماس شوید",
     footPriv: "کلیدهای API فقط روی همین دستگاه ذخیره می‌شوند و هرگز به سرور ما فرستاده نمی‌شوند.",
@@ -158,6 +174,14 @@ const DICT = {
     checkCode: "請確認代碼",
     missingCode: "缺少場次代碼",
     readyHosted: "已就緒 — 免設定。按開始並允許麥克風權限即可。",
+    offline: "連線中斷 — 正在重新連線…",
+    backOnline: "已重新連線 ✓",
+    reconnecting: "重新連線中…",
+    micDenied: "麥克風被封鎖。請在網址列的圖示允許權限，然後再按開始。",
+    micNotFound: "找不到麥克風。請接上一支或改選其他輸入裝置，然後再按開始。",
+    micBusy: "麥克風正被其他程式使用。請先關閉該程式再試一次。",
+    micStalled: "麥克風沒有送出聲音 — 請檢查線材或藍牙連線。",
+    quotaOut: "所有金鑰都已達今日上限。請在進階設定新增金鑰，或明天再繼續。",
     footTag: "即時聽打與翻譯",
     footAsk: "有問題或建議？聯絡 Paul",
     footPriv: "您的 API 金鑰只存在這台裝置上，不會傳送到我們的伺服器。",
@@ -198,6 +222,11 @@ export function applyI18n(root = document) {
   for (const el of root.querySelectorAll("[data-i18n]")) el.textContent = t(el.dataset.i18n);
   for (const el of root.querySelectorAll("[data-i18n-ph]")) el.placeholder = t(el.dataset.i18nPh);
   document.documentElement.lang = cur === "zh" ? "zh-Hant" : cur === "prs" ? "prs" : "en";
+  // The offline banner is drawn by CSS from this attribute, so it has to be
+  // refreshed whenever the interface language changes.
+  for (const bar of document.querySelectorAll(".topbar,.stagebar")) {
+    bar.setAttribute("data-offline", t("offline"));
+  }
   // Mirror the whole console for an RTL operator — the layout is flex, so it flips.
   document.documentElement.dir = RTL_UI.has(cur) ? "rtl" : "ltr";
   document.body.classList.toggle("ui-rtl", RTL_UI.has(cur));

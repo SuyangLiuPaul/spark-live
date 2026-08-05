@@ -1,5 +1,6 @@
 import { subscribe } from "./channel.js";
 import { t, applyI18n, mountUiSwitch } from "./i18n.js";
+import { createWakeLock, createToast } from "./resilience.js";
 
 const $ = (id) => document.getElementById(id);
 // `/join/CODE` is a 200 rewrite, so the browser URL keeps the path and carries
@@ -125,11 +126,22 @@ function render(doc) {
   if (pinned) window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
 }
 
+/* Audience phones sleep in ~30 s, which means unlocking the phone every time
+   you want to read the translation. Hold the screen awake while watching. */
+const wake = createWakeLock();
+const toast = createToast();
+wake.on();
+
+let wasOffline = false;
+
 subscribe({
   session,
   onDoc: render,
   onStatus: (s) => {
     $("dot").className = "dot" + (s.ok ? " on" : s.notFound ? " bad" : "");
+    document.body.classList.toggle("offline", !!s.offline);
+    if (s.offline && !wasOffline) { wasOffline = true; toast(t("reconnecting"), "bad"); }
+    else if (!s.offline && wasOffline) { wasOffline = false; toast(t("backOnline"), "ok"); }
     if (s.notFound) {
       $("feed").innerHTML = `<div class="empty">${t("notFound")}: <b>${esc(session)}</b><br /><span class="sub">${t("checkCode")}</span></div>`;
       lastSig = "";

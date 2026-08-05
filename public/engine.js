@@ -262,7 +262,9 @@ async function transcribeGroq({ blob, pool, model, language, signal, proxy }) {
       throw e;
     }
   }
-  throw lastErr || new Error("ASR: all keys rate-limited");
+  const e = lastErr || new Error("all_keys_rate_limited");
+  if (e.status === 429) e.exhausted = true;
+  throw e;
 }
 
 async function transcribeOnce({ blob, key, model, language, signal }) {
@@ -526,7 +528,17 @@ export class LiveEngine {
     this.rate = await this.cap.start();
     this.running = true;
     this.lastVoiceAt = Date.now();
-    this.timer = setInterval(() => this._tick().catch((e) => this.on.error(e)), TICK_MS);
+    this.lastTickAt = Date.now();
+    this.lastAudioAt = Date.now();
+    this.stallWarned = false;
+    // Background tabs throttle setInterval to about once a MINUTE, which would
+    // silently stall a live session the moment the presenter checks a message.
+    // The AudioWorklet keeps delivering while hidden, so audio is the reliable
+    // clock; the interval stays only as a safety net and as the stall detector.
+    this.timer = setInterval(() => {
+      this._watchdog();
+      this._maybeTick();
+    }, TICK_MS);
     this.on.status({ running: true });
   }
 
@@ -539,6 +551,11 @@ export class LiveEngine {
 
   _audio(chunk, rate) {
     if (!this.running) return;
+    this.lastAudioAt = Date.now();
+    if (this.stallWarned) {                 // recovered (e.g. mic reconnected)
+      this.stallWarned = false;
+      this.on.status({ running: true, stalled: false });
+    }
     const pcm = resampleTo16k(chunk, rate);
     this.buf.push(pcm);
     this.bufLen += pcm.length;
@@ -549,6 +566,28 @@ export class LiveEngine {
     const rms = Math.sqrt(sum / Math.max(1, pcm.length));
     this.on.level(Math.min(1, rms * 8));
     if (rms > SILENCE_RMS) this.lastVoiceAt = Date.now();
+    this._maybeTick();
+  }
+
+  /** Fire a confirm pass when one is due, whatever woke us. */
+  _maybeTick() {
+    if (!this.running || this.busy) return;
+    if (Date.now() - this.lastTickAt < TICK_MS) return;
+    this.lastTickAt = Date.now();
+    this._tick().catch((e) => this.on.error(e));
+  }
+
+  /**
+   * Audio silently stopping is a real failure mode — a Bluetooth mic drops, or
+   * the OS hands the device to another app. Without this the UI keeps saying
+   * "Live" while nothing is being captured.
+   */
+  _watchdog() {
+    if (!this.running || this.stallWarned) return;
+    if (Date.now() - this.lastAudioAt < 5000) return;
+    this.stallWarned = true;
+    this.on.status({ running: true, stalled: true });
+    this.on.error(new Error("audio_stalled"));
   }
 
   /** Whole-buffer loudness — decides whether a window is worth transcribing. */
@@ -571,6 +610,7 @@ export class LiveEngine {
 
   async _tick() {
     if (!this.running || this.busy) return;
+    this.lastTickAt = Date.now();
     const seconds = this.bufLen / 16000;
     if (seconds < MIN_WINDOW_S) return;
 
