@@ -297,3 +297,11 @@ instead of 2.2 s. These are **daily** totals, shared across services.
 - Auto-handoff of the session WAV into the Mac pipeline for the archive PDF
   (today: "下載整場錄音" then upload it to Spark Transcribe manually).
 - Viewer-selectable display mode (currently Dari-primary with source beneath).
+
+**CDN-collapsed polling — the header must be set IN the function.** Netlify's
+`[[headers]]` block does **not** apply to function responses: the `s-maxage=1`
+rule in `netlify.toml` never reached `/api/feed`, which answered `no-cache`, so
+every poll from every phone was its own invocation. `feed.mjs` now sets
+`public, s-maxage=1, stale-while-revalidate=4` itself, on the 204 as well as the
+200 (while nobody is speaking the 204s are the bulk of the traffic). Verified
+after the fix: 7 of 10 rapid identical polls served from cache (`age > 0`).
