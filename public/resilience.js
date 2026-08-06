@@ -107,3 +107,44 @@ export function micErrorMessage(err, t) {
   if (name === "NotReadableError" || name === "AbortError") return t("micBusy");
   return (err?.message || String(err)).slice(0, 200);
 }
+
+/* ── incident reporting ───────────────────────────────────────────────
+   Sends only service-affecting failures to /api/errorReport, which emails
+   them. Fire-and-forget and never awaited by a caller: a broken reporter
+   must not become a second visible failure on top of the first.
+
+   The server caps hard (5 per session, same kind once per 10 min) because
+   the worst outcome here is an inbox flood during a live sermon. This side
+   also refuses to report the same kind twice in one session, so a wedged
+   microphone firing every 2 s produces exactly one request. */
+export function createReporter({ session, hosted }) {
+  const sentKinds = new Set();
+  const startedAt = Date.now();
+  let quota = "";
+
+  return {
+    setQuota(q) { quota = q || ""; },
+    report(kind, message, detail) {
+      if (sentKinds.has(kind)) return;      // once per kind per session
+      sentKinds.add(kind);
+      try {
+        const body = JSON.stringify({
+          kind, session, hosted,
+          message: String(message || "").slice(0, 1000),
+          detail: String(detail || "").slice(0, 4000),
+          langs: (window.__sparkTargets || []),
+          elapsedS: (Date.now() - startedAt) / 1000,
+          quota,
+          url: location.href,
+          ua: navigator.userAgent,
+        });
+        // keepalive so the report still goes out if the tab is closing —
+        // which is exactly when an uncaught error tends to happen.
+        fetch("/api/errorReport", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body, keepalive: true,
+        }).catch(() => {});
+      } catch { /* never let reporting throw into the caller */ }
+    },
+  };
+}

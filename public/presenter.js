@@ -1,7 +1,7 @@
 import { LiveEngine, LANGS , listInputs } from "./engine.js";
 import { t, applyI18n, mountUiSwitch } from "./i18n.js";
 import { createPublisher } from "./channel.js";
-import { createWakeLock, createConnection, createToast, micErrorMessage } from "./resilience.js";
+import { createWakeLock, createConnection, createToast, micErrorMessage, createReporter } from "./resilience.js";
 
 const $ = (id) => document.getElementById(id);
 const LS = {
@@ -118,6 +118,7 @@ async function showQuota() {
     // ~2h covers a long service; below that the operator needs to know now.
     el.className = h < 2 ? "hint warn" : "hint";
     el.textContent = h < 2 ? t("quotaLow", h) : t("quotaOk", h);
+    reporter.setQuota(`${h}h remaining, ${q.keys} keys`);
     // A cold function has no observations yet — say so rather than imply precision.
     if (!q.measured) el.textContent += " " + t("quotaEstimate");
   } catch { /* the pill and banner already report an unreachable relay */ }
@@ -274,6 +275,7 @@ window.addEventListener("ui:lang", () => {
 
 /* ── resilience ── */
 const wake = createWakeLock();
+const reporter = createReporter({ session, hosted: HOSTED });
 const toast = createToast();
 const conn = createConnection({
   onChange: ({ online }) => {
@@ -299,7 +301,12 @@ function schedulePush() {
     pushTimer = null;
     doc.v += 1;
     try { await publisher.push(doc); }
-    catch (e) { conn.report(false); showErr(t("publishFail") + e.message); }
+    catch (e) {
+      conn.report(false); showErr(t("publishFail") + e.message);
+      // Only once the connection has genuinely given up — a single failed push
+      // during a blip is not an incident.
+      if (!conn.online) reporter.report("publish_failed", "audience stopped receiving", e.message);
+    }
   }, 400);
 }
 
@@ -414,9 +421,21 @@ $("startBtn").onclick = async () => {
     interim: (t) => { doc.interim = t || ""; renderDraft(); schedulePush(); },
     error: (e) => {
       const msg = String(e && e.message ? e.message : e);
-      if (msg === "audio_stalled") { showErr(t("micStalled")); toast(t("micStalled"), "bad"); return; }
-      if (e && e.exhausted) { showErr(t("quotaOut")); toast(t("quotaOut"), "bad"); return; }
+      if (msg === "audio_stalled") {
+        showErr(t("micStalled")); toast(t("micStalled"), "bad");
+        reporter.report("mic_stalled", t("micStalled"), "no audio from the input for 5s");
+        return;
+      }
+      if (e && e.exhausted) {
+        showErr(t("quotaOut")); toast(t("quotaOut"), "bad");
+        reporter.report("quota_exhausted", t("quotaOut"), msg);
+        return;
+      }
       showErr(msg);
+      // Only report a persistent transcription failure, not a one-off retry
+      // that rotation already absorbed.
+      if (/ASR|asr/.test(msg)) reporter.report("asr_failed", "speech recognition failing", msg);
+      else reporter.report("translate_failed", "correction/translation failing", msg);
     },
     status: (s) => { $("dot").classList.toggle("bad", !!s.stalled); },
     line: (l) => {
@@ -434,6 +453,7 @@ $("startBtn").onclick = async () => {
     const why = e.message === "missing_asr_key" ? t("noGroq") : micErrorMessage(e, t);
     $("setupMsg").textContent = t("cantStart") + why;
     toast(why, "bad");
+    reporter.report("mic_denied", why, `${e.name || ""}: ${e.message || e}`);
     return;
   }
 
@@ -520,3 +540,14 @@ window.addEventListener("beforeunload", (e) => {
 // which are declared below the language-picker setup where this used to sit.
 announceIdle();
 showQuota();   // pre-flight only: never polled, never shown mid-session
+
+// Context the reporter attaches to any incident.
+window.__sparkTargets = targets;
+window.addEventListener("error", (e) => {
+  reporter.report("uncaught", e.message || "uncaught error",
+    `${e.filename || ""}:${e.lineno || ""}\n${e.error?.stack || ""}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  reporter.report("uncaught", "unhandled promise rejection",
+    String(e.reason?.stack || e.reason || "").slice(0, 2000));
+});

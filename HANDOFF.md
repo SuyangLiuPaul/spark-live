@@ -282,6 +282,30 @@ is 13.3 h, interim 80 h. Past exhaustion it degrades rather than stops — the
 daily cap refills continuously, so the pool sustains one ASR pass every 5.4 s
 instead of 2.2 s. These are **daily** totals, shared across services.
 
+
+## Error monitoring (`netlify/functions/errorReport.mjs`)
+Mirrors YsWords' reporter — same Resend account, same always-204 contract — with
+the differences a live service needs. `RESEND_API_KEY` and `FEEDBACK_TO` are
+Netlify env vars on the prod site; without the key it logs and still 204s.
+
+Only service-affecting kinds are accepted: `mic_denied`, `mic_stalled`,
+`quota_exhausted`, `asr_failed`, `translate_failed`, `publish_failed`,
+`uncaught`. A 429 that rotation already absorbed is not an incident and never
+reaches it.
+
+**The design constraint is not capture, it is not flooding the inbox mid-sermon.**
+Three caps: the client sends a given kind at most once per session; the server
+dedupes (session, kind) for 10 minutes; and a session is capped at 5 emails
+total. Verified: 6 identical posts produced one email.
+
+Each report carries the session code, elapsed time, target languages, hosted vs
+own-key, and the quota reading at the time — a report without that context does
+not explain anything.
+
+> Resend's Cloudflare 403s (`error code: 1010`) on Python's default User-Agent,
+> exactly like Groq. Node's `fetch` inside the function is unaffected; only
+> test scripts need a browser UA.
+
 ## Gotchas (each cost a real debugging cycle)
 - **`/join/:code` is a 200 rewrite, not a redirect.** The browser URL keeps the
   path and carries **no query string** → assets must use **absolute** paths
