@@ -1,6 +1,6 @@
 import { subscribe } from "./channel.js";
 import { t, applyI18n, mountUiSwitch } from "./i18n.js";
-import { createWakeLock, createToast } from "./resilience.js";
+import { createWakeLock, createToast, createReporter } from "./resilience.js";
 
 const $ = (id) => document.getElementById(id);
 // `/join/CODE` is a 200 rewrite, so the browser URL keeps the path and carries
@@ -160,6 +160,22 @@ function render(doc) {
 const wake = createWakeLock();
 const toast = createToast();
 wake.on();
+
+/* The audience view had no error reporting at all — yet it is the screen the
+   room is actually reading. A rendering failure here is invisible to the
+   presenter, who is looking at their own console. Report only unhandled
+   exceptions: a phone losing signal is normal and would be pure noise. The
+   server dedupes on (session, kind), so 70 phones hitting the same bug send
+   one email, not seventy. */
+const reporter = createReporter({ session, hosted: true });
+window.addEventListener("error", (e) => {
+  reporter.report("viewer_broken", e.message || "uncaught error in audience view",
+    `${e.filename || ""}:${e.lineno || ""}\n${e.error?.stack || ""}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  reporter.report("viewer_broken", "unhandled rejection in audience view",
+    String(e.reason?.stack || e.reason || "").slice(0, 2000));
+});
 
 let wasOffline = false;
 
