@@ -9,7 +9,15 @@
  */
 
 const API = "";              // same origin
-const POLL_MS = 1000;        // viewers poll ~1/s; the CDN absorbs the load
+// Viewers poll every 3s, not every 1s. Measured: at 1s polling a 40-person
+// congregation costs ~194,000 function invocations for a single 3-hour service
+// — more than a whole month's free-tier allowance (125,000). The CDN collapses
+// only about half the traffic, because concurrent requests inside one cache
+// window all miss before the first response is stored.
+//
+// 3s is invisible to a reader: a translated line stays on screen for many
+// seconds, and the live tail already updates from the presenter's own stream.
+const POLL_MS = 3000;
 
 /** Presenter side: push the whole session document. */
 export function createPublisher({ session, token }) {

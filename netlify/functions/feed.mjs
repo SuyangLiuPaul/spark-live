@@ -47,7 +47,7 @@ export default async (req) => {
   // every phone became its own invocation. `netlify-vary: query` keys the cache
   // on the query string, so viewers sitting at the same version share one
   // entry — which is exactly what the original design intended.
-  const CACHE = "public, s-maxage=1, stale-while-revalidate=4";
+  const CACHE = "public, s-maxage=3, stale-while-revalidate=10";   // widened with POLL_MS
 
   if (since >= 0 && Number(doc.v) <= since) {
     // A 204 MUST carry a null body — passing "" makes the runtime emit a 502.

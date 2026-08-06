@@ -88,15 +88,23 @@ refinement** — show fast text, then visibly upgrade it:
   ~$0.04 but measurably worse; see the benchmark below).
 - LLM: Groq `openai/gpt-oss-120b`, one call per sentence ≈ **US$0.2/hour**.
 - **All-in ≈ US$0.30 per hour of live translated speech, on a single Groq key.**
-- Audience: `feed.mjs` sets `public, s-maxage=1, stale-while-revalidate=4` on its
-  own responses (200 **and** 204), so the CDN collapses viewer polls into roughly
-  one function invocation per second regardless of audience size. This is what
-  keeps a full room on the free tier.
-  **Set it in the function, not `netlify.toml`** — `[[headers]]` rules do not
-  apply to function responses. The rule sat in `netlify.toml` for months while
-  the endpoint actually answered `no-cache`, so every poll from every phone was
-  its own invocation. Verified after the fix: 7 of 10 rapid identical polls
-  served from cache (`age > 0`), against 0 before.
+- Audience polling is the scaling constraint, and CDN collapsing is only
+  partial. Concurrent requests inside one cache window all miss before the
+  first response is stored, so roughly half the traffic reached the function at
+  a 1 s poll. Measured with 40 simulated viewers:
+
+  | | 1 s poll / `s-maxage=1` | 3 s poll / `s-maxage=3` |
+  |---|---|---|
+  | CDN-served | 45% | **84%** |
+  | origin rate | 13.4/s | **1.56/s** |
+  | invocations per 3 h service | 194,400 | **16,842** |
+
+  At 1 s polling a single 40-person service exceeded the **entire free-tier
+  monthly allowance of 125,000**. `POLL_MS` is now 3 s with `s-maxage=3`, which
+  fits roughly 70 viewers weekly or 35 twice-weekly. Beyond a few hundred
+  viewers, polling is the wrong mechanism — swap `channel.js` for SSE.
+  **Netlify also rate-limits per IP** (403 at ~125 req/s from one address): a
+  congregation sharing one WiFi egress could trip it.
 - Payload is bounded: `publish.mjs` keeps the last 120 lines ≈ 30 KB of varied
   Chinese/Dari/English, ~1.7 KB compressed. A viewer spends roughly **2 MB over a
   three-hour service**; unchanged polls are a 0-byte 204.
