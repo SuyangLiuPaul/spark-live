@@ -88,9 +88,18 @@ refinement** — show fast text, then visibly upgrade it:
   ~$0.04 but measurably worse; see the benchmark below).
 - LLM: Groq `openai/gpt-oss-120b`, one call per sentence ≈ **US$0.2/hour**.
 - **All-in ≈ US$0.30 per hour of live translated speech, on a single Groq key.**
-- Audience: `netlify.toml` puts `s-maxage=1` on `/api/feed`, so the **CDN collapses
-  every viewer's 1 s poll into ~1 function invocation per second** regardless of
-  how many people are watching. This is what keeps a full room on the free tier.
+- Audience: `feed.mjs` sets `public, s-maxage=1, stale-while-revalidate=4` on its
+  own responses (200 **and** 204), so the CDN collapses viewer polls into roughly
+  one function invocation per second regardless of audience size. This is what
+  keeps a full room on the free tier.
+  **Set it in the function, not `netlify.toml`** — `[[headers]]` rules do not
+  apply to function responses. The rule sat in `netlify.toml` for months while
+  the endpoint actually answered `no-cache`, so every poll from every phone was
+  its own invocation. Verified after the fix: 7 of 10 rapid identical polls
+  served from cache (`age > 0`), against 0 before.
+- Payload is bounded: `publish.mjs` keeps the last 120 lines ≈ 30 KB of varied
+  Chinese/Dari/English, ~1.7 KB compressed. A viewer spends roughly **2 MB over a
+  three-hour service**; unchanged polls are a 0-byte 204.
 
 ## Measured on real sermon audio (2026-07-02, `sermon.wav`, 3×25 s windows)
 
@@ -297,11 +306,3 @@ instead of 2.2 s. These are **daily** totals, shared across services.
 - Auto-handoff of the session WAV into the Mac pipeline for the archive PDF
   (today: "下載整場錄音" then upload it to Spark Transcribe manually).
 - Viewer-selectable display mode (currently Dari-primary with source beneath).
-
-**CDN-collapsed polling — the header must be set IN the function.** Netlify's
-`[[headers]]` block does **not** apply to function responses: the `s-maxage=1`
-rule in `netlify.toml` never reached `/api/feed`, which answered `no-cache`, so
-every poll from every phone was its own invocation. `feed.mjs` now sets
-`public, s-maxage=1, stale-while-revalidate=4` itself, on the 204 as well as the
-200 (while nobody is speaking the 204s are the bulk of the traffic). Verified
-after the fix: 7 of 10 rapid identical polls served from cache (`age > 0`).
