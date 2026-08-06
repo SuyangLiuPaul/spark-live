@@ -98,14 +98,26 @@ if (HOSTED) {
    is already automatic, so a ticking gauge would be anxiety with no action. */
 async function showQuota() {
   const el = $("quotaHint");
-  if (!el || !HOSTED) return;                 // BYOK: the browser never sees the pool
+  if (!el) return;
+
+  // Show it whenever we can get a trustworthy number — the old check was
+  // "hosted mode?", which hid it on the dev rig even though that site has the
+  // same pool behind the same endpoint. The condition that actually matters is
+  // whether the keys the session will USE are the ones /api/quota reports on.
+  //
+  // Pre-filled keys (dev's config.js) are the pool, so the number is right. A
+  // key the operator typed themselves is NOT, and reporting the service pool's
+  // remaining hours for someone spending their own quota would be a lie.
+  const typed = groqPool().filter((k) => !PRESET_POOL.includes(k));
+  if (typed.length) { el.textContent = ""; return; }
+
   try {
     const q = await (await fetch("/api/quota")).json();
     if (!q || typeof q.hours !== "number") return;
     const h = q.hours;
     // ~2h covers a long service; below that the operator needs to know now.
     el.className = h < 2 ? "hint warn" : "hint";
-    el.textContent = h < 2 ? t("quotaLow", h) : t("quotaOk", h, q.keys);
+    el.textContent = h < 2 ? t("quotaLow", h) : t("quotaOk", h);
     // A cold function has no observations yet — say so rather than imply precision.
     if (!q.measured) el.textContent += " " + t("quotaEstimate");
   } catch { /* the pill and banner already report an unreachable relay */ }
