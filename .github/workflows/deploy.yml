@@ -49,6 +49,20 @@ jobs:
           fi
           echo "no credentials in the repository"
 
+      # netlify-cli takes ~45 s to install before it can tell you the token is
+      # missing, and then only says "Unauthorized: could not retrieve project",
+      # which reads like a permissions problem on the site rather than an empty
+      # secret. Check it up front. Printing the length is safe and is the only
+      # way to distinguish "not set" from "set to something wrong".
+      - name: Check the Netlify token is present
+        run: |
+          n=${#NETLIFY_AUTH_TOKEN}
+          if [ "$n" -eq 0 ]; then
+            echo "::error::NETLIFY_AUTH_TOKEN is empty. Set it with: gh secret set NETLIFY_AUTH_TOKEN --repo SuyangLiuPaul/spark-live"
+            exit 1
+          fi
+          echo "token present ($n characters)"
+
       - run: npm ci || npm install
 
       - name: Deploy dev
