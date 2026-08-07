@@ -34,7 +34,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # netlify-cli's dependencies declare node >=22.12; on 20 the install
+          # is a wall of EBADENGINE warnings waiting to become a hard failure.
+          node-version: 22
 
       # Belt and braces: deploy.sh scans the publish tree, but a credential
       # committed anywhere in the repo should fail before we reach a deploy.
