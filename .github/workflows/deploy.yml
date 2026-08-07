@@ -50,14 +50,14 @@ jobs:
       - run: npm ci || npm install
 
       - name: Deploy dev
-        run: ./deploy.sh dev "ci: ${{ github.sha }}"
+        run: ./deploy.sh dev "ci ${{ github.sha }}"
 
       # The real gate. Runs the shipped engine against dev's live backends.
       - name: Smoke test dev
         run: node tools/smoke.mjs https://spark-live-dev.netlify.app
 
       - name: Deploy prod
-        run: ./deploy.sh prod "ci: ${{ github.sha }}"
+        run: ./deploy.sh prod "ci ${{ github.sha }}"
 
       - name: Smoke test prod
         run: node tools/smoke.mjs https://spark-live-translate.netlify.app
