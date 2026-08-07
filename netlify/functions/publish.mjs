@@ -56,7 +56,16 @@ export default async (req) => {
   // Bound the payload so a very long session can't grow without limit.
   const lines = Array.isArray(doc.lines) ? doc.lines.slice(-120) : [];
   const clean = {
-    v: Number(doc.v) || 0,
+    // The version must only ever move FORWARD for a session code. The
+    // presenter's doc.v is per-page-load state and resets to 0 on every
+    // reload, so a refresh used to republish v=1 over a stored v=40 — and
+    // /api/feed answers 204 whenever stored.v <= the viewer's last seen
+    // version, freezing every phone in the room permanently. The presenter
+    // sees their own console updating fine and has no idea.
+    //
+    // The server is the only place that knows the previous value, so
+    // monotonicity belongs here, not in the client.
+    v: Math.max(Number(doc.v) || 0, (Number(existing?.doc?.v) || 0) + 1),
     title: String(doc.title || "").slice(0, 200),
     live: !!doc.live,
     ended: !!doc.ended,
