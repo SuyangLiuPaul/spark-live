@@ -26,7 +26,46 @@ const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const TICK_MS = 2200;        // confirm pass cadence — tighter = text lands sooner
 const MIN_WINDOW_S = 1.2;
 const MAX_WINDOW_S = 28;
-const SILENCE_RMS = 0.012;
+/**
+ * Voice/silence detection.
+ *
+ * This used to be one absolute threshold (0.012) compared against the mean RMS
+ * of the whole window, and that combination can kill a service outright: mic
+ * gain varies more than twentyfold between a headset and a phone on a lectern,
+ * and averaging a window that includes the pauses between words pulls the
+ * figure well under the level of the speech inside it. A presenter whose input
+ * landed under the line got a session that showed "Live", moved the meter, and
+ * never made a single transcription request — no text, and no error either,
+ * because no call was ever attempted.
+ *
+ * So the floor is now learned from the room instead of assumed, and the gate
+ * fails OPEN: when it is not sure, it transcribes. A needless call costs one
+ * request out of ~16,000; a needless skip costs the whole event.
+ */
+const SILENCE_ABS = 0.0015;    // below this is true digital near-silence
+const SILENCE_MARGIN = 2.2;    // speech must clear the learned floor by this much
+const FLOOR_MIN_OBS = 8;       // observations before the learned floor is trusted
+const FORCE_PROBE_MS = 30000;  // never skip for longer than this while audio arrives
+
+/**
+ * The level-independent half of the decision, and the one that actually carries
+ * it. Speech is bursty — loud syllables separated by gaps — while room tone is
+ * flat, so the ratio between a window's loud frames and its quiet frames tells
+ * the two apart without knowing anything about the microphone's gain. Measured
+ * across the same sentence attenuated from 0.16 down to 0.003 RMS (a fiftyfold
+ * span, far wider than the difference between a headset and a phone on a
+ * lectern) it stayed at 9.6–9.8; an empty room reads 1.1. Anything above 3
+ * is speech, and no absolute level threshold can make that call.
+ */
+const DYN_FRAME = 480;         // 30 ms at 16 kHz
+const DYN_SPEECH = 3.0;
+
+// Ceiling for the raw-PCM archive fallback: 45 min at 16 kHz Float32 ≈ 173 MB.
+// Only reached on a browser with no MediaRecorder at all.
+const PCM_ARCHIVE_MAX = 45 * 60 * 16000;
+
+// How long to sit out after every key reports its daily cap spent.
+const EXHAUSTED_BACKOFF_MS = 60000;
 const SILENCE_FLUSH_MS = 700; // a pause this long ends a unit
 const MAX_SENTENCE_CHARS = 150;
 const MAX_UNIT_WAIT_MS = 6000;// never sit on committed text longer than this
@@ -64,6 +103,22 @@ export async function listInputs() {
   return { devices, labelled: devices.some((d) => d.label) };
 }
 
+/**
+ * Container for the session archive, in the browser's order of preference.
+ *
+ * Both are already accepted by the Mac batch pipeline (server/worker.py), which
+ * is the archive's only consumer, so the presenter's "record now, run it
+ * through Spark Transcribe afterwards" workflow is unaffected by which one a
+ * given browser picks. iOS Safari has no WebM at all and only ever produces
+ * the second.
+ */
+const ARCHIVE_TYPES = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/mp4",
+];
+const ARCHIVE_BPS = 32000;   // Opus at 32 kbps is transparent enough for speech
+
 class Capture {
   constructor(onChunk) {
     this.onChunk = onChunk;
@@ -71,6 +126,57 @@ class Capture {
     this.node = null;
     this.src = null;
     this.stream = null;
+    this.rec = null;          // MediaRecorder, when the browser has one
+    this.recChunks = [];
+    this.recType = "";
+  }
+
+  /**
+   * Record the session for the archive.
+   *
+   * This used to be done by keeping every raw PCM chunk the worklet produced —
+   * Float32 at 16 kHz, so 64 KB per second, retained for the whole service and
+   * then copied twice more to build the WAV. A three-hour sermon held 659 MB
+   * and peaked near 1.6 GB on download, which is several times what an iOS tab
+   * is allowed before the OS kills it; the session would die mid-sermon and
+   * take the audience's transcript with it on reload.
+   *
+   * MediaRecorder does the same job at about 4 KB/s (~43 MB for three hours)
+   * and lets the browser own the buffering. The live pipeline still runs off
+   * the worklet — this is a second, independent consumer of the same stream.
+   */
+  _startRecorder() {
+    if (typeof MediaRecorder === "undefined") return;
+    const type = ARCHIVE_TYPES.find((t) => {
+      try { return MediaRecorder.isTypeSupported(t); } catch { return false; }
+    });
+    if (!type) return;
+    try {
+      this.rec = new MediaRecorder(this.stream, { mimeType: type, audioBitsPerSecond: ARCHIVE_BPS });
+      this.recType = type;
+      this.rec.ondataavailable = (e) => { if (e.data && e.data.size) this.recChunks.push(e.data); };
+      // stop() delivers its final slice asynchronously, so reading the chunks
+      // straight after stopping loses the last segment — the end of the sermon.
+      // Callers await this instead.
+      this.recDone = new Promise((resolve) => {
+        this.rec.onstop = resolve;
+        this.rec.onerror = resolve;
+      });
+      // A timeslice means the blob is delivered in pieces as we go, so nothing
+      // is lost if the session ends abruptly and no single allocation is huge.
+      this.rec.start(15000);
+    } catch {
+      this.rec = null;        // fall back to the capped PCM archive
+    }
+  }
+
+  /** Stop recording and wait for the final slice to land. Safe to call twice. */
+  async flushArchive() {
+    if (!this.rec) return;
+    if (this.rec.state !== "inactive") {
+      try { this.rec.stop(); } catch { return; }
+    }
+    await this.recDone;
   }
 
   async start() {
@@ -120,10 +226,20 @@ class Capture {
     mute.gain.value = 0;
     this.node.connect(mute);
     mute.connect(this.ctx.destination);
+    this._startRecorder();
     return this.ctx.sampleRate;
   }
 
+  /** The recorded session, or null when this browser had no MediaRecorder. */
+  archive() {
+    if (!this.rec || !this.recChunks.length) return null;
+    // Strip the codec parameter: a Blob type of "audio/webm;codecs=opus" makes
+    // some upload endpoints reject the file on a MIME allow-list.
+    return new Blob(this.recChunks, { type: this.recType.split(";")[0] });
+  }
+
   stop() {
+    try { this.rec && this.rec.state !== "inactive" && this.rec.stop(); } catch {}
     // Detach the foreground listener too, or a stopped session keeps a closed
     // context alive through the document and leaks on every restart.
     if (this._wake) {
@@ -151,6 +267,26 @@ function resampleTo16k(input, rate) {
     out[i] = a + (b - a) * frac;
   }
   return out;
+}
+
+/**
+ * Ratio of the window's loud frames to its quiet ones — see DYN_SPEECH. Uses
+ * percentiles rather than max/min so one door slam or one dropout can't decide
+ * it. Too short a window to judge reports 0, which the caller reads as "don't
+ * skip on my account".
+ */
+function dynamicRange(pcm) {
+  const frames = [];
+  for (let i = 0; i + DYN_FRAME <= pcm.length; i += DYN_FRAME) {
+    let s = 0;
+    for (let j = i; j < i + DYN_FRAME; j += 2) s += pcm[j] * pcm[j];
+    frames.push(Math.sqrt(s / (DYN_FRAME / 2)));
+  }
+  if (frames.length < 8) return 0;
+  frames.sort((a, b) => a - b);
+  const lo = frames[Math.floor(frames.length * 0.2)];
+  const hi = frames[Math.floor(frames.length * 0.9)];
+  return hi / Math.max(lo, 1e-6);
 }
 
 function rmsOf(pcm) {
@@ -226,14 +362,23 @@ async function proxyFetch(url, init) {
   const res = await fetch(url, { ...init, headers: { ...(init.headers || {}), ...accessHeaders() } });
   if (!res.ok) {
     let msg = `${res.status}`;
+    let upstream = 0;
     try {
       const j = await res.json();
+      upstream = Number(j.status) || 0;
       msg = j.error === "not_configured" ? "server has no key pool configured"
           : j.error === "bad_access_code" ? "access code rejected"
           : `${j.error || res.status}${j.status ? " " + j.status : ""}`;
     } catch {}
     const err = new Error(msg);
     err.status = res.status;
+    // A drained pool is not a bug, it's a budget, and it has its own message and
+    // its own incident category. On the hosted path the 429 arrives WRAPPED —
+    // the proxy answers `{error:"upstream", status:429}` — so testing only the
+    // outer status missed it, and the site the church actually uses reported
+    // "upstream 429" and filed it as `asr_failed`. Hour three of a service is
+    // exactly when this fires.
+    if (res.status === 429 || upstream === 429) err.exhausted = true;
     throw err;
   }
   return res.json();
@@ -534,6 +679,26 @@ function parseJson(raw) {
   return null;
 }
 
+/**
+ * Order the translation providers for a session.
+ *
+ * Fast-and-good first, reliable-but-slow last; only configured steps join. The
+ * subtlety that broke the hosted site outright is that the `proxy` step carries
+ * NO key — that is the entire point of hosted mode — so a filter on `.key`
+ * silently produced an empty chain and every Start died with
+ * "missing_llm_key". Lives here rather than inline in the console so it can be
+ * tested without a DOM.
+ */
+export function buildLlmChain({ useProxy = false, groqKeys = [], gemini = "", kimi = "", glm = "" } = {}) {
+  return [
+    ...(useProxy ? [{ id: "proxy" }] : []),
+    { id: "groq",   key: (groqKeys && groqKeys[0]) || "" },
+    { id: "gemini", key: gemini },
+    { id: "kimi",   key: kimi },
+    { id: "glm",    key: glm },
+  ].filter((s) => s.id === "proxy" || s.key);
+}
+
 /* ───────────────────────── engine ───────────────────────── */
 
 export class LiveEngine {
@@ -564,7 +729,9 @@ export class LiveEngine {
     this.translateQueue = Promise.resolve();
     this.pendingSince = 0;
     this._interimAt = 0; this._interimSrc = ""; this._interimBusy = false;
-    this.archive = [];         // full-session PCM, for the post-event archive
+    this.archive = [];         // PCM fallback only — see PCM_ARCHIVE_MAX
+    this.archiveLen = 0;
+    this.archiveTruncated = false;
   }
 
   events(map) { Object.assign(this.on, map); return this; }
@@ -589,6 +756,9 @@ export class LiveEngine {
     this.lastVoiceAt = Date.now();
     this.lastTickAt = Date.now();
     this.lastAudioAt = Date.now();
+    // Measure the forced-probe window from the start of the session; left
+    // unset it reads as "last transcribed at epoch 0" and fires on tick one.
+    this.lastAsrAt = Date.now();
     this.stallWarned = false;
     // Background tabs throttle setInterval to about once a MINUTE, which would
     // silently stall a live session the moment the presenter checks a message.
@@ -618,22 +788,49 @@ export class LiveEngine {
     const pcm = resampleTo16k(chunk, rate);
     this.buf.push(pcm);
     this.bufLen += pcm.length;
-    this.archive.push(pcm);
+    // Raw PCM is only retained where the browser gave us no MediaRecorder, and
+    // even then it is bounded: unbounded retention is what put 659 MB in a
+    // three-hour tab. A truncated archive is a far smaller loss than a session
+    // that gets killed by the OS in the middle of the sermon.
+    if (!this.cap || !this.cap.rec) {
+      this.archive.push(pcm);
+      this.archiveLen += pcm.length;
+      while (this.archiveLen > PCM_ARCHIVE_MAX) {
+        this.archiveLen -= this.archive.shift().length;
+        this.archiveTruncated = true;
+      }
+    }
 
     let sum = 0;
     for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
     const rms = Math.sqrt(sum / Math.max(1, pcm.length));
-    this.on.level(Math.min(1, rms * 8));
-    if (rms > SILENCE_RMS) this.lastVoiceAt = Date.now();
+    // Auto-gain the meter off the loudest thing heard so far, so a quiet input
+    // still shows movement across the bar instead of a permanent sliver that
+    // looks identical to a dead microphone.
+    this.peakRms = Math.max(this.peakRms || 0, rms);
+    const scale = this.peakRms > 0.02 ? 1 / this.peakRms : 8;
+    this.on.level(Math.min(1, rms * scale));
+    if (rms > this._voiceFloor()) this.lastVoiceAt = Date.now();
     this._maybeTick();
   }
 
   /** Fire a confirm pass when one is due, whatever woke us. */
   _maybeTick() {
     if (!this.running || this.busy) return;
+    // A drained pool refills continuously (~43 s per whisper request), so the
+    // right response is to wait it out, not to keep firing every 2.2 s — that
+    // spends nothing but latency and buries the console in identical errors.
+    if (Date.now() < (this.coolUntil || 0)) return;
     if (Date.now() - this.lastTickAt < TICK_MS) return;
     this.lastTickAt = Date.now();
-    this._tick().catch((e) => this.on.error(e));
+    this._tick().catch((e) => {
+      if (e && e.exhausted) {
+        this.coolUntil = Date.now() + EXHAUSTED_BACKOFF_MS;
+        this.exhausted = true;
+        this.on.status({ running: true, exhausted: true });
+      }
+      this.on.error(e);
+    });
   }
 
   /**
@@ -651,6 +848,34 @@ export class LiveEngine {
     this.stallWarned = true;
     this.on.status({ running: true, stalled: true });
     this.on.error(new Error("audio_stalled"));
+  }
+
+  /**
+   * Remember what this room actually sounds like. Only the quietest windows
+   * inform the floor, so a long stretch of speech can't drag it up and start
+   * suppressing the speech that raised it.
+   */
+  _noteLevel(v) {
+    if (!Number.isFinite(v)) return;
+    (this.levels || (this.levels = [])).push(v);
+    if (this.levels.length > 150) this.levels.shift();
+  }
+
+  /**
+   * The level a window must clear to be worth transcribing: the 20th percentile
+   * of what we've heard, times a margin. Until there are enough observations to
+   * mean anything, only true digital silence is skipped — an unknown room is
+   * transcribed, not guessed at.
+   */
+  _voiceFloor() {
+    const n = this.levels ? this.levels.length : 0;
+    // Before the room is known, leave this check deliberately insensitive and
+    // let dynamic range do the work — it needs no calibration, so an empty room
+    // isn't transcribed just for having a noise floor above digital silence.
+    if (n < FLOOR_MIN_OBS) return SILENCE_ABS * SILENCE_MARGIN;
+    const sorted = this.levels.slice().sort((a, b) => a - b);
+    const quiet = sorted[Math.floor(n * 0.2)];
+    return Math.max(SILENCE_ABS, quiet * SILENCE_MARGIN);
   }
 
   /** Whole-buffer loudness — decides whether a window is worth transcribing. */
@@ -682,11 +907,23 @@ export class LiveEngine {
     // buffer is below the voice floor and the stabiliser has nothing pending,
     // there is no text to recover: drop the silence and skip the call.
     const pcm = this._flat();
-    if (!this.agree.pendingText() && rmsOf(pcm) < SILENCE_RMS) {
+    const level = rmsOf(pcm);
+    this._noteLevel(level);
+    // The safety net that makes a wrong floor survivable: however quiet this
+    // input looks, never go longer than FORCE_PROBE_MS without actually asking,
+    // as long as something above true silence is arriving. Worst case this
+    // spends ~360 requests across a three-hour service, against a budget of
+    // 16,000 — the price of never again shipping a session that dies quietly.
+    const overdue = Date.now() - (this.lastAsrAt || 0) > FORCE_PROBE_MS && level > SILENCE_ABS;
+    // Three independent reasons to spend the call, and it only takes one. Level
+    // alone was the old gate and the reason a whole session could go dark.
+    const worthIt = dynamicRange(pcm) >= DYN_SPEECH || level >= this._voiceFloor();
+    if (!overdue && !worthIt && !this.agree.pendingText()) {
       this._trim(seconds - MIN_WINDOW_S / 2);
       this.skipped = (this.skipped || 0) + 1;
       return;
     }
+    this.lastAsrAt = Date.now();
 
     this.busy = true;
     try {
@@ -696,6 +933,12 @@ export class LiveEngine {
         blob: wav, pool: this.pool, proxy: this.cfg.proxy,
         model: this.cfg.groqModel, language: this.cfg.language,
       });
+      // Budget came back on its own — say so, so the console stops showing a
+      // quota warning that is no longer true.
+      if (this.exhausted) {
+        this.exhausted = false;
+        this.on.status({ running: true, exhausted: false });
+      }
 
       const { stable, cut } = this.agree.push(words);
       if (stable.length) {
@@ -808,6 +1051,9 @@ Reply with JSON only: {"t":"..."}`;
   async drain() {
     this._flushSentence();
     await this.translateQueue;
+    // The recorder's last slice lands after stop(); without this the download
+    // silently loses the closing minutes of the service.
+    if (this.cap) await this.cap.flushArchive();
   }
 
   /** How many keys are currently not benched — surfaced in the console. */
@@ -820,14 +1066,22 @@ Reply with JSON only: {"t":"..."}`;
     };
   }
 
-  /** Full-session WAV, for pushing through the Mac pipeline afterwards. */
-  archiveWav() {
-    let len = 0;
-    for (const c of this.archive) len += c.length;
-    const all = new Float32Array(len);
+  /**
+   * The session recording, for pushing through the Mac pipeline afterwards.
+   * Returns `{ blob, ext, truncated }`, or null when nothing was captured.
+   *
+   * Await `drain()` first — the recorder's final slice arrives asynchronously.
+   */
+  archiveFile() {
+    const recorded = this.cap && this.cap.archive();
+    if (recorded) {
+      return { blob: recorded, ext: recorded.type.includes("mp4") ? "m4a" : "webm", truncated: false };
+    }
+    if (!this.archive.length) return null;
+    const all = new Float32Array(this.archiveLen);
     let o = 0;
     for (const c of this.archive) { all.set(c, o); o += c.length; }
-    return encodeWav(all, 16000);
+    return { blob: encodeWav(all, 16000), ext: "wav", truncated: this.archiveTruncated };
   }
 }
 

@@ -45,18 +45,30 @@ function usable(keys) {
   return [keys.reduce((a, b) => ((cooldown.get(a) || 0) <= (cooldown.get(b) || 0) ? a : b))];
 }
 
-function bench(key, res) {
+function bench(key, res, minMs = 0) {
   const secs = Number(res.headers?.get?.("retry-after"));
   const ms = Number.isFinite(secs) && secs > 0
     ? Math.min(3600000, Math.max(5000, secs * 1000))
     : 60000;
-  cooldown.set(key, Date.now() + ms);
+  cooldown.set(key, Date.now() + Math.max(ms, minMs));
 }
 
 /**
- * Try each usable key in turn. A 429 means "this key is spent right now", which
- * is exactly what the next key is for. Anything else is a real error and is
- * returned immediately rather than burning the rest of the pool on it.
+ * Statuses that condemn THIS KEY rather than the request itself.
+ *
+ * 429 is the obvious one, but 401 (revoked) and 403 (rejected at Groq's edge —
+ * a blocked or flagged account shows up as a Cloudflare "Access denied") are
+ * just as key-specific, and that is precisely what the other seven keys are
+ * for. The original code `break`-ed on anything that wasn't a 429 or a 5xx, so
+ * one bad key failed the whole request with the rest of the pool untouched.
+ */
+const KEY_FAULT = new Set([401, 403, 429]);
+
+/**
+ * Try each usable key in turn. A key-specific rejection moves on to the next
+ * key; a request-level 4xx (400/413/422 — our payload is wrong) would fail
+ * identically on every key, so it returns immediately rather than burning the
+ * whole pool proving it.
  */
 export async function withKeys(run, kind) {
   const keys = keyPool();
@@ -72,7 +84,13 @@ export async function withKeys(run, kind) {
       return { res };
     }
     last = res;
-    if (res.status === 429) { bench(key, res); continue; }
+    if (KEY_FAULT.has(res.status)) {
+      // A revoked or blocked key won't recover in a minute the way a spent one
+      // does, so keep it out of rotation for longer instead of paying a failed
+      // round-trip for it on every request for the rest of the service.
+      bench(key, res, res.status === 429 ? 0 : 15 * 60 * 1000);
+      continue;
+    }
     if (res.status >= 500) continue;
     break;
   }

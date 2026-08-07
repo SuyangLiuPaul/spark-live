@@ -88,6 +88,16 @@
 
   <!-- ══ LIVE ══ -->
   <div class="panel" id="livePanel" style="display:none">
+    <!-- Shown only when the console was reopened while a session was still
+         marked live. The audience keeps reading the restored transcript; this
+         is the one tap needed to put the microphone back. -->
+    <div class="resumebar" id="resumeBar" hidden>
+      <div>
+        <strong data-i18n="resumeTitle">Session interrupted</strong>
+        <div class="sub" data-i18n="resumeBody">The audience is still connected and can see the transcript so far. Press Resume to start listening again.</div>
+      </div>
+      <button class="primary" id="resumeBtn" data-i18n="resume">▶ Resume</button>
+    </div>
     <div class="meter"><i id="meterBar"></i></div>
     <div class="row" style="margin-bottom:6px">
       <button class="danger" id="stopBtn" data-i18n="stop">■ Stop</button>

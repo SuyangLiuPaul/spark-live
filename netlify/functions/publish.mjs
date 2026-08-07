@@ -54,7 +54,26 @@ export default async (req) => {
   }
 
   // Bound the payload so a very long session can't grow without limit.
-  const lines = Array.isArray(doc.lines) ? doc.lines.slice(-120) : [];
+  let lines = Array.isArray(doc.lines) ? doc.lines.slice(-120) : [];
+  let live = !!doc.live;
+
+  // Never let an idle announcement blank a running session.
+  //
+  // The presenter console publishes an "idle" document on every page load, and
+  // its in-memory transcript is empty at that moment. So a refresh — or an iOS
+  // tab the OS killed for memory, mid-sermon — replaced the room's transcript
+  // with "not started" on every phone at once, and the monotonic `v` above
+  // guaranteed the wipe was accepted rather than ignored. The presenter's own
+  // screen looked fine throughout.
+  //
+  // Ending a service is `ended: true`, and starting a fresh one mints a new
+  // code AND a new token, so neither legitimate reset reaches this branch.
+  const wasLive = !!existing?.doc?.live;
+  if (wasLive && !live && !doc.ended && !lines.length) {
+    lines = Array.isArray(existing.doc.lines) ? existing.doc.lines : [];
+    live = true;
+  }
+
   const clean = {
     // The version must only ever move FORWARD for a session code. The
     // presenter's doc.v is per-page-load state and resets to 0 on every
@@ -67,7 +86,7 @@ export default async (req) => {
     // monotonicity belongs here, not in the client.
     v: Math.max(Number(doc.v) || 0, (Number(existing?.doc?.v) || 0) + 1),
     title: String(doc.title || "").slice(0, 200),
-    live: !!doc.live,
+    live,
     ended: !!doc.ended,
     draft: String(doc.draft || "").slice(0, 2000),
     interim: String(doc.interim || "").slice(0, 2000),

@@ -1,4 +1,4 @@
-import { LiveEngine, LANGS , listInputs } from "./engine.js";
+import { LiveEngine, LANGS, listInputs, buildLlmChain } from "./engine.js";
 import { t, applyI18n, mountUiSwitch } from "./i18n.js";
 import { createPublisher } from "./channel.js";
 import { createWakeLock, createConnection, createToast, micErrorMessage, createReporter } from "./resilience.js";
@@ -23,9 +23,11 @@ const joinUrlFor = (c) => `${location.origin}/join/${c}`;
 async function paintSession() {
   $("code").value = session;
   $("joinUrl").textContent = joinUrlFor(session);
-  // QR is a nicety, not a dependency — if the CDN is blocked we still show the link.
+  // Vendored locally: this used to come from jsdelivr, and church-hall networks
+  // block third-party CDNs often enough that the QR would silently vanish from
+  // the screen the congregation is supposed to scan.
   try {
-    if (!qrcodeLib) qrcodeLib = (await import("https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/+esm")).default;
+    if (!qrcodeLib) qrcodeLib = (await import("./vendor/qrcode.js")).default;
     const qr = qrcodeLib(0, "M");
     qr.addData(joinUrlFor(session));
     qr.make();
@@ -160,6 +162,73 @@ function announceIdle() {
   doc.live = false;
   doc.ended = false;
   schedulePush();
+}
+
+/**
+ * Come back from a reload without the room noticing.
+ *
+ * A presenter's page can go away mid-service for reasons that have nothing to
+ * do with them: an accidental refresh, iOS reclaiming a backgrounded tab, a
+ * laptop waking up unhappy. Before this, reopening the console published an
+ * idle document and every phone in the room fell back to "not started".
+ *
+ * So: ask the relay what it already holds for our code first. If a session is
+ * still marked live and was updated recently, adopt it — same code, same
+ * token, transcript restored — and offer Resume rather than Start. Capture
+ * cannot restart without a user gesture (the AudioContext needs one), which is
+ * exactly why this is a button and not automatic.
+ */
+const RESUME_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+async function adoptLiveSession() {
+  let stored = null;
+  try {
+    const res = await fetch(`/api/feed?s=${encodeURIComponent(session)}&v=-1`, { cache: "no-store" });
+    if (res.ok) stored = await res.json();
+  } catch { /* offline: fall through to the local mirror */ }
+
+  // The relay is authoritative, but a venue with no signal at the wrong moment
+  // shouldn't cost the transcript either.
+  if (!stored || !stored.live) stored = readLocalMirror();
+  if (!stored || !stored.live) return false;
+  if (Date.now() - (Number(stored.updatedAt) || 0) > RESUME_WINDOW_MS) return false;
+
+  doc.title = String(stored.title || doc.title);
+  doc.langs = Array.isArray(stored.langs) ? stored.langs : doc.langs;
+  doc.lines = Array.isArray(stored.lines) ? stored.lines : [];
+  doc.startedAt = Number(stored.startedAt) || Date.now();
+  doc.live = true;
+  doc.ended = false;
+  if (doc.title) $("title").value = doc.title;
+
+  renderLines();
+  $("setupPanel").style.display = "none";
+  $("livePanel").style.display = "";
+  $("dot").className = "dot";
+  $("statePill").textContent = t("stateInterrupted");
+  $("statePill").className = "pill";
+  $("resumeBar").hidden = false;
+  $("stopBtn").style.display = "none";
+  toast(t("resumeFound"), "bad");
+  return true;
+}
+
+/* Mirror of the published document, so a reload can restore the transcript
+   even when the relay is unreachable. Throttled by schedulePush's own 400 ms
+   batching, and capped by the same 120-line bound the relay applies. */
+function writeLocalMirror() {
+  try {
+    LS.set("mirror", JSON.stringify({
+      session, title: doc.title, langs: doc.langs, lines: doc.lines.slice(-120),
+      live: doc.live, startedAt: doc.startedAt, updatedAt: Date.now(),
+    }));
+  } catch { /* private mode, or quota — the relay copy still covers us */ }
+}
+function readLocalMirror() {
+  try {
+    const m = JSON.parse(LS.get("mirror") || "null");
+    return m && m.session === session ? m : null;
+  } catch { return null; }
 }
 
 /* ── target languages ── */
@@ -300,6 +369,7 @@ function schedulePush() {
   pushTimer = setTimeout(async () => {
     pushTimer = null;
     doc.v += 1;
+    writeLocalMirror();
     try { await publisher.push(doc); }
     catch (e) {
       conn.report(false); showErr(t("publishFail") + e.message);
@@ -393,26 +463,28 @@ $("testBtn").onclick = async () => {
 };
 
 /* ── start / stop ── */
-$("startBtn").onclick = async () => {
+/**
+ * Bring the microphone up and go live.
+ *
+ * `resume` means the console is rejoining a session that is already published
+ * and already being read: the code, token, transcript and start time all stay
+ * as they are, and only the capture side is rebuilt.
+ */
+async function beginCapture({ resume = false } = {}) {
   const groqKeys = groqPool();
   // Hosted deployments need no key: the proxy holds the pool server-side. A key
   // typed here still wins, so a presenter can spend their own quota if they want.
   const useProxy = HOSTED && !groqKeys.length;
   if (!useProxy && !groqKeys.length) { $("setupMsg").textContent = t("noGroq"); return; }
 
-  // Fast-and-good first, reliable-but-slow last. Only configured keys join.
-  // The groq step gets no `key`: the engine hands it the rotating pool.
-  const llmChain = [
-    ...(useProxy ? [{ id: "proxy" }] : []),
-    { id: "groq",   key: groqKeys[0] },
-    { id: "gemini", key: $("geminiKey").value.trim() },
-    { id: "kimi",   key: $("kimiKey").value.trim() },
-    { id: "glm",    key: $("glmKey").value.trim() },
-    // The proxy step carries NO key by design — that is the entire point of
-    // hosted mode. Filtering on `.key` alone therefore stripped it, leaving an
-    // empty chain and "Couldn't start: missing_llm_key" on every Start. The
-    // hosted site could not begin a session at all.
-  ].filter((s) => s.id === "proxy" || s.key);
+  // See buildLlmChain in engine.js — the ordering and the proxy-has-no-key
+  // subtlety live there so tools/smoke.mjs can assert them without a DOM.
+  const llmChain = buildLlmChain({
+    useProxy, groqKeys,
+    gemini: $("geminiKey").value.trim(),
+    kimi:   $("kimiKey").value.trim(),
+    glm:    $("glmKey").value.trim(),
+  });
 
   engine = new LiveEngine({
     groqKey: groqKeys[0], groqKeys, proxy: useProxy, deviceId: micId, llmChain, targets,
@@ -441,7 +513,12 @@ $("startBtn").onclick = async () => {
       if (/ASR|asr/.test(msg)) reporter.report("asr_failed", "speech recognition failing", msg);
       else reporter.report("translate_failed", "correction/translation failing", msg);
     },
-    status: (s) => { $("dot").classList.toggle("bad", !!s.stalled); },
+    status: (s) => {
+      $("dot").classList.toggle("bad", !!s.stalled);
+      // The pool refills on its own; clear the quota warning when it does,
+      // otherwise the console keeps accusing a budget that has come back.
+      if (s.exhausted === false) { showErr(""); toast(t("quotaBack"), "ok"); }
+    },
     line: (l) => {
       const i = doc.lines.findIndex((x) => x.id === l.id);
       if (i >= 0) doc.lines[i] = l; else doc.lines.push(l);
@@ -455,10 +532,13 @@ $("startBtn").onclick = async () => {
     await engine.start();
   } catch (e) {
     const why = e.message === "missing_asr_key" ? t("noGroq") : micErrorMessage(e, t);
-    $("setupMsg").textContent = t("cantStart") + why;
+    // On resume the setup panel is hidden, so its message would be invisible —
+    // the failure has to land where the presenter is actually looking.
+    if (resume) showErr(t("cantStart") + why);
+    else $("setupMsg").textContent = t("cantStart") + why;
     toast(why, "bad");
     reporter.report("mic_denied", why, `${e.name || ""}: ${e.message || e}`);
-    return;
+    return false;
   }
 
   // A sleeping screen ends the session; hold the lock for as long as we're live.
@@ -468,16 +548,29 @@ $("startBtn").onclick = async () => {
 
   doc.title = $("title").value.trim() || "Spark Live";
   doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
-  doc.live = true; doc.ended = false; doc.startedAt = Date.now();
+  doc.live = true; doc.ended = false;
+  // Resuming keeps the original start time: the service did not restart just
+  // because the presenter's browser did.
+  if (!resume) doc.startedAt = Date.now();
   schedulePush();
 
   renderPreviewLang();
   $("setupPanel").style.display = "none";
   $("livePanel").style.display = "";
+  $("resumeBar").hidden = true;
+  $("stopBtn").style.display = "";
   $("dot").className = "dot on";
   $("statePill").textContent = t("stateLive");
   $("statePill").className = "pill live";
   showErr("");
+  return true;
+}
+
+$("startBtn").onclick = () => beginCapture();
+$("resumeBtn").onclick = async () => {
+  $("resumeBtn").disabled = true;
+  try { await beginCapture({ resume: true }); }
+  finally { $("resumeBtn").disabled = false; }
 };
 
 $("stopBtn").onclick = async () => {
@@ -486,9 +579,24 @@ $("stopBtn").onclick = async () => {
   engine.stop();
   wake.off();
   await engine.drain();
-  doc.live = false; doc.ended = true; doc.draft = "";
+  doc.live = false; doc.ended = true; doc.draft = ""; doc.interim = "";
   doc.v += 1;
-  try { await publisher.push(doc); conn.report(true); } catch { conn.report(false); }
+  writeLocalMirror();
+  // The one push that has no successor. Every other update is followed by
+  // another within seconds, so a failure self-heals; if this one is lost the
+  // room is left watching a session that never says it finished — and the
+  // server now deliberately refuses to let an empty document end a live
+  // session, so `ended` has to actually arrive.
+  let delivered = false;
+  for (let attempt = 0; attempt < 4 && !delivered; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 400 * 2 ** attempt));
+    try { await publisher.push(doc); delivered = true; } catch { /* retry */ }
+  }
+  conn.report(delivered);
+  if (!delivered) {
+    showErr(t("endNotDelivered"));
+    reporter.report("publish_failed", "session end never reached the audience", "4 attempts failed");
+  }
   $("dot").className = "dot";
   $("statePill").textContent = t("stateEnded");
   $("statePill").className = "pill ended";
@@ -526,14 +634,26 @@ $("settingsBtn").onclick = () => {
   $("advPanel").scrollIntoView({ behavior: "smooth", block: "start" });
 };
 
-$("dlBtn").onclick = () => {
+$("dlBtn").onclick = async () => {
   if (!engine) return;
-  const blob = engine.archiveWav();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${(doc.title || "spark-live").replace(/[^\w一-龥-]+/g, "_")}.wav`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  // Mid-session downloads are allowed, but the recorder is still holding an
+  // unflushed slice; drain first so the file is complete either way.
+  $("dlBtn").disabled = true;
+  try {
+    await engine.drain();
+    const file = engine.archiveFile();
+    if (!file) { toast(t("noRecording"), "bad"); return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(file.blob);
+    a.download = `${(doc.title || "spark-live").replace(/[^\w一-龥-]+/g, "_")}.${file.ext}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    // Only reachable on a browser with no MediaRecorder, where the archive is
+    // capped — say so rather than letting them discover it at the Mac.
+    if (file.truncated) toast(t("recordingTruncated"), "bad");
+  } finally {
+    $("dlBtn").disabled = false;
+  }
 };
 
 window.addEventListener("beforeunload", (e) => {
@@ -542,7 +662,9 @@ window.addEventListener("beforeunload", (e) => {
 
 // Runs last on purpose: it touches `doc`, `publisher` and `schedulePush`, all of
 // which are declared below the language-picker setup where this used to sit.
-announceIdle();
+// Adopting an interrupted session must be tried FIRST — announcing idle over a
+// live session is precisely the failure this guards against.
+adoptLiveSession().then((resumed) => { if (!resumed) announceIdle(); });
 showQuota();   // pre-flight only: never polled, never shown mid-session
 
 // Context the reporter attaches to any incident.

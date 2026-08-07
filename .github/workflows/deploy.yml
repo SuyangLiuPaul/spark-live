@@ -1,0 +1,63 @@
+# Spark Live — deploy on push.
+#
+# This exists because production once served a bundle five commits behind dev,
+# for weeks, with nothing anywhere reporting it. The fix was committed, dev was
+# redeployed, prod was not, and the gap only surfaced when someone stood in
+# front of a room and it did not work.
+#
+# So the gate is the smoke suite, and prod is only reached through it: dev is
+# deployed first and must pass against real backends before production is
+# touched. A failure after the prod deploy still fails the run loudly.
+#
+# Requires one repository secret: NETLIFY_AUTH_TOKEN.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Two overlapping pushes must not race each other onto the same site.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Belt and braces: deploy.sh scans the publish tree, but a credential
+      # committed anywhere in the repo should fail before we reach a deploy.
+      - name: Scan the repository for credentials
+        run: |
+          if grep -rIlE 'gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,}|re_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}' \
+               --exclude-dir=.git --exclude-dir=node_modules .; then
+            echo "::error::a credential is committed in the files above"
+            exit 1
+          fi
+          echo "no credentials in the repository"
+
+      - run: npm ci || npm install
+
+      - name: Deploy dev
+        run: ./deploy.sh dev "ci: ${{ github.sha }}"
+
+      # The real gate. Runs the shipped engine against dev's live backends.
+      - name: Smoke test dev
+        run: node tools/smoke.mjs https://spark-live-dev.netlify.app
+
+      - name: Deploy prod
+        run: ./deploy.sh prod "ci: ${{ github.sha }}"
+
+      - name: Smoke test prod
+        run: node tools/smoke.mjs https://spark-live-translate.netlify.app

@@ -103,6 +103,21 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .pill.live{color:var(--accent2); border-color:rgba(125,255,176,.35); background:rgba(125,255,176,.08)}
 .pill.ended{color:var(--faint)}
 
+/* Recovery banner after the console was reopened mid-session. Deliberately the
+   loudest thing on the panel: the room is reading a transcript that has stopped
+   growing, and the only person who can fix that is looking at this. */
+.resumebar{
+  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  margin:0 0 14px; padding:12px 14px;
+  border:1px solid rgba(255,198,92,.38); border-radius:var(--radius);
+  background:rgba(255,198,92,.09);
+}
+.resumebar strong{color:var(--warn); font-size:14px}
+.resumebar .sub{margin-top:2px}
+.resumebar > div:first-child{flex:1 1 220px}
+.resumebar button{flex:0 0 auto}
+.ui-rtl .resumebar{flex-direction:row-reverse}
+
 /* ── audience view ── */
 .stage{min-height:100vh;display:flex;flex-direction:column;padding:0}
 .stagebar{

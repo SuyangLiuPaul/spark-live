@@ -37,8 +37,59 @@ const KINDS = new Set([
 const DEDUPE_MS = 10 * 60 * 1000;   // same session+kind: once per 10 min
 const MAX_PER_SESSION = 5;          // hard ceiling per session, ever
 
-const _recent = new Map();          // `${session}|${kind}` -> timestamp
-const _sessionCount = new Map();    // session -> emails sent
+/**
+ * The caps have to be shared across function instances, not held in one.
+ *
+ * They used to live in module-scope Maps, which sound global but are per warm
+ * Lambda: with the audience view reporting too, seventy phones hitting the same
+ * bug land on however many instances Netlify has warm, and each one believes it
+ * is sending the first email. The whole point of these limits is that a bad
+ * service cannot flood the inbox, so they belong in shared storage.
+ *
+ * The blob store is already used by the relay. A read-modify-write race here
+ * costs at most one duplicate email, which is a far better failure than the
+ * flood — so it is deliberately not locked.
+ */
+import { getStore } from "@netlify/blobs";
+
+const STORE = "spark-live";
+const LEDGER = "incidents/ledger.json";
+const LEDGER_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function ledger() {
+  try {
+    const store = getStore({ name: STORE, consistency: "strong" });
+    const cur = (await store.get(LEDGER, { type: "json" }).catch(() => null)) || {};
+    return { store, cur };
+  } catch {
+    return { store: null, cur: {} };
+  }
+}
+
+/** Returns true when this report should be sent, and records it if so. */
+async function claim(session, kind) {
+  const { store, cur } = await ledger();
+  const now = Date.now();
+
+  // Sessions are single-day events; drop anything older so the ledger cannot
+  // grow forever.
+  for (const [k, v] of Object.entries(cur)) {
+    if (now - (v.last || 0) > LEDGER_TTL_MS) delete cur[k];
+  }
+
+  const e = cur[session] || { count: 0, kinds: {}, last: 0 };
+  if (e.count >= MAX_PER_SESSION) return false;
+  if (e.kinds[kind] && now - e.kinds[kind] < DEDUPE_MS) return false;
+
+  e.kinds[kind] = now;
+  e.count += 1;
+  e.last = now;
+  cur[session] = e;
+  // A serverless instance freezes the moment it responds, so this must be
+  // awaited or the ledger silently never updates and every cap is off.
+  if (store) { try { await store.setJSON(LEDGER, cur); } catch {} }
+  return true;
+}
 
 const clamp = (s, n) => (typeof s === "string" ? s.slice(0, n) : "");
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
@@ -64,19 +115,8 @@ export default async (req) => {
   if (!KINDS.has(kind)) return noContent();          // not service-affecting
 
   const session = clamp(b?.session || "?", 16);
-  const now = Date.now();
 
-  const sent = _sessionCount.get(session) || 0;
-  if (sent >= MAX_PER_SESSION) return noContent();
-
-  const dk = `${session}|${kind}`;
-  const prev = _recent.get(dk);
-  if (prev && now - prev < DEDUPE_MS) return noContent();
-  _recent.set(dk, now);
-  if (_recent.size > 500) {
-    for (const [k, v] of _recent) if (now - v > DEDUPE_MS) _recent.delete(k);
-  }
-  _sessionCount.set(session, sent + 1);
+  if (!(await claim(session, kind))) return noContent();
 
   const message  = clamp(b?.message || "", 1000);
   const detail   = clamp(b?.detail || "", 4000);
