@@ -408,7 +408,11 @@ $("startBtn").onclick = async () => {
     { id: "gemini", key: $("geminiKey").value.trim() },
     { id: "kimi",   key: $("kimiKey").value.trim() },
     { id: "glm",    key: $("glmKey").value.trim() },
-  ].filter((s) => s.key);
+    // The proxy step carries NO key by design — that is the entire point of
+    // hosted mode. Filtering on `.key` alone therefore stripped it, leaving an
+    // empty chain and "Couldn't start: missing_llm_key" on every Start. The
+    // hosted site could not begin a session at all.
+  ].filter((s) => s.id === "proxy" || s.key);
 
   engine = new LiveEngine({
     groqKey: groqKeys[0], groqKeys, proxy: useProxy, deviceId: micId, llmChain, targets,
