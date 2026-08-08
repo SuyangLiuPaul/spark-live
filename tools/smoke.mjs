@@ -296,14 +296,27 @@ await section("a dropped translation is retried", async () => {
    published an empty idle document (blanking every phone). Both are asserted,
    along with the fact that Stop can still legitimately end a session. */
 await section("relay: reload safety", async () => {
-  const S = "SMOKE" + Math.floor(Math.random() * 90 + 10);
+  // 90 possible codes ("SMOKE10".."SMOKE99") meant roughly one run in five
+  // picked a code a previous run had already claimed with a different token.
+  // Both publishes then 409'd, the test read the OLD ended document, and the
+  // reload assertion failed with live=false lines=0 — pointing at the app for
+  // a fault entirely inside this file. Use a code space that will not collide.
+  const rnd = () => Math.random().toString(36).slice(2, 8).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const S = ("SMK" + rnd() + rnd()).slice(0, 12);
   const token = "smoketoken" + Math.random().toString(36).slice(2);
   const langs = [{ c: "prs", label: "دری", rtl: true }];
   const lines = [{ id: 1, src: "Good morning.", tr: { prs: "صبح بخیر" }, pending: false }];
-  const pub = (doc) => probe(`${ORIGIN}/api/publish`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ session: S, token, doc }),
-  }).then((r) => r.json());
+  // A publish that fails is a broken PRECONDITION, not a result. Left
+  // unchecked it silently poisons every assertion that follows.
+  const pub = async (doc) => {
+    const r = await probe(`${ORIGIN}/api/publish`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session: S, token, doc }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) throw new Error(`publish ${S} failed: HTTP ${r.status} ${j.error || ""}`);
+    return j;
+  };
   // s-maxage=3 on /api/feed: vary the URL or this reads the CDN, not the relay.
   const feed = () => probe(`${ORIGIN}/api/feed?s=${S}&v=-1&_=${Math.random()}`, { cache: "no-store" })
     .then((r) => (r.status === 200 ? r.json() : null));
