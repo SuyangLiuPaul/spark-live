@@ -39,8 +39,27 @@ async function section(title, fn) {
 globalThis.window = { SPARK_LIVE_CONFIG: {} };
 globalThis.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
 const realFetch = globalThis.fetch;
+// The engine's own fetch is deliberately NOT retried here: retrying inside the
+// shim would hide a regression in the engine's own resilience, which is one of
+// the things this suite exists to check.
 globalThis.fetch = (u, init) =>
   realFetch(typeof u === "string" && u.startsWith("/") ? ORIGIN + u : u, init);
+
+/**
+ * The suite's own probes, as opposed to anything the app does. A reset socket
+ * between this runner and the CDN says nothing about the deployment, and a gate
+ * that goes red at random is a gate people learn to ignore — which is worse
+ * than no gate. Retries transport failures only; any HTTP response, including a
+ * bad one, is returned as-is and still fails the assertion it belongs to.
+ */
+async function probe(url, init, tries = 3) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try { return await realFetch(url, init); }
+    catch (e) { last = e; await new Promise((r) => setTimeout(r, 400 * 2 ** i)); }
+  }
+  throw last;
+}
 
 const { LiveEngine, KeyPool, buildLlmChain } =
   await import("file://" + path.join(ROOT, "public", "engine.js"));
@@ -61,6 +80,9 @@ function readWav(file) {
   return pcm;
 }
 const SPEECH = readWav(path.join(HERE, "fixtures", "speech-16k.wav"));
+// The interim (provisional) translation asks for a cheap model by name; that is
+// how a translate call is told apart from an interim one in the drop test below.
+const INTERIM_MODEL_HINT = "llama-3.1-8b-instant";
 const attenuate = (pcm, k) => pcm.map((x) => x * k);
 
 /** Deterministic empty-room tone: no speech, only a low steady noise floor. */
@@ -128,7 +150,7 @@ console.log(`\x1b[1mSpark Live smoke\x1b[0m  →  ${ORIGIN}`);
    a later deploy that simply dropped the file knocked the console out of proxy
    mode so it demanded a key it does not need. Both directions are asserted. */
 await section("config", async () => {
-  const res = await realFetch(`${ORIGIN}/config.js`);
+  const res = await probe(`${ORIGIN}/config.js`);
   const body = res.ok ? await res.text() : "";
   const leaked = (body.match(/gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,}|re_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}/g) || []);
   check("config.js exposes no credentials", leaked.length === 0, leaked.length ? `${leaked.length} found` : "");
@@ -146,7 +168,7 @@ await section("deployed bundle is current", async () => {
   const sum = (s) => createHash("sha256").update(s.replace(/\r\n/g, "\n").trim()).digest("hex").slice(0, 12);
   for (const f of ["engine.js", "presenter.js", "viewer.js", "channel.js", "i18n.js", "styles.css"]) {
     const local = fs.readFileSync(path.join(ROOT, "public", f), "utf8");
-    const r = await realFetch(`${ORIGIN}/${f}`);
+    const r = await probe(`${ORIGIN}/${f}`);
     const remote = r.ok ? await r.text() : "";
     check(`${f} matches this checkout`, r.ok && sum(local) === sum(remote),
           r.ok ? `local ${sum(local)} vs deployed ${sum(remote)}` : `HTTP ${r.status}`);
@@ -157,7 +179,7 @@ await section("deployed bundle is current", async () => {
    prod once ran a months-stale bundle whose /api/asr returned Groq 403 on
    every call while /api/chat was fine — so each endpoint is probed separately. */
 await section("backends", async () => {
-  const q = await realFetch(`${ORIGIN}/api/quota`).then((r) => r.json()).catch(() => null);
+  const q = await probe(`${ORIGIN}/api/quota`).then((r) => r.json()).catch(() => null);
   check("/api/quota answers", !!q && !q.error, q && q.error ? q.error : `${q?.keys ?? 0} keys, ${q?.hours ?? "?"}h`);
   check("key pool is not empty", !!q && q.keys > 0);
   check("at least one key is ready", !!q && q.pool && q.pool.ready > 0, q ? `${q?.pool?.ready}/${q?.pool?.total}` : "");
@@ -165,11 +187,11 @@ await section("backends", async () => {
   const fd = new FormData();
   fd.append("file", wavBlob(SPEECH.subarray(0, 16000)), "chunk.wav");
   fd.append("model", "whisper-large-v3-turbo");
-  const a = await realFetch(`${ORIGIN}/api/asr`, { method: "POST", body: fd });
+  const a = await probe(`${ORIGIN}/api/asr`, { method: "POST", body: fd });
   const aj = await a.json().catch(() => ({}));
   check("/api/asr transcribes", a.ok && typeof aj.text === "string", a.ok ? "" : `HTTP ${a.status} ${JSON.stringify(aj).slice(0, 120)}`);
 
-  const c = await realFetch(`${ORIGIN}/api/chat`, {
+  const c = await probe(`${ORIGIN}/api/chat`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ sys: 'Reply with JSON only: {"t":"..."}', prompt: "Say hello" }),
   });
@@ -229,7 +251,36 @@ await section("Cantonese", async () => {
   check("Cantonese is still translated", r.translated.length > 0, `${r.translated.length} translated`);
 });
 
-/* ═══ 7. the relay survives a presenter reload ═══
+/* ═══ 7. a dropped connection does not cost a sentence ═══
+   Speech recognition heals itself — the next tick re-transcribes the same
+   audio. Translation does not: it is issued once per committed line, so a reset
+   socket used to leave that sentence untranslated for good, and the audience
+   read source text in a language they came here because they cannot read.
+   The drop is injected on the TRANSLATE call only; the provisional interim call
+   also hits /api/chat and is meant to fail silently. */
+await section("a dropped translation is retried", async () => {
+  const outer = globalThis.fetch;
+  let dropped = 0;
+  globalThis.fetch = async (u, init) => {
+    const body = String(init?.body || "");
+    if (String(u).includes("/api/chat") && !body.includes(INTERIM_MODEL_HINT) && dropped === 0) {
+      dropped = 1;
+      throw new TypeError("fetch failed");
+    }
+    return outer(u, init);
+  };
+  try {
+    const r = await runEngine(SPEECH, { seconds: 14, language: "en" });
+    check("the drop was actually injected", dropped === 1);
+    check("the sentence is still translated", r.translated.length > 0,
+          `translated=${r.translated.length} failed=${r.lines.filter((l) => l.failed).length}`);
+    check("no line is left marked failed", r.lines.every((l) => !l.failed));
+  } finally {
+    globalThis.fetch = outer;
+  }
+});
+
+/* ═══ 8. the relay survives a presenter reload ═══
    A reload republished v=1 over a stored v=40 (freezing every phone), and
    published an empty idle document (blanking every phone). Both are asserted,
    along with the fact that Stop can still legitimately end a session. */
@@ -238,12 +289,12 @@ await section("relay: reload safety", async () => {
   const token = "smoketoken" + Math.random().toString(36).slice(2);
   const langs = [{ c: "prs", label: "دری", rtl: true }];
   const lines = [{ id: 1, src: "Good morning.", tr: { prs: "صبح بخیر" }, pending: false }];
-  const pub = (doc) => realFetch(`${ORIGIN}/api/publish`, {
+  const pub = (doc) => probe(`${ORIGIN}/api/publish`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ session: S, token, doc }),
   }).then((r) => r.json());
   // s-maxage=3 on /api/feed: vary the URL or this reads the CDN, not the relay.
-  const feed = () => realFetch(`${ORIGIN}/api/feed?s=${S}&v=-1&_=${Math.random()}`, { cache: "no-store" })
+  const feed = () => probe(`${ORIGIN}/api/feed?s=${S}&v=-1&_=${Math.random()}`, { cache: "no-store" })
     .then((r) => (r.status === 200 ? r.json() : null));
 
   await pub({ v: 40, title: "Smoke", live: true, ended: false, langs, lines });

@@ -695,12 +695,33 @@ export const LLM_PROVIDERS = {
 };
 
 /** Walk the chain until one provider answers. Returns {raw, via}. */
+/**
+ * A dropped connection is not a verdict on the provider.
+ *
+ * `fetch failed` — a reset socket, a cold function, a phone changing cell —
+ * arrives with no `.status` at all, and the old code treated it exactly like a
+ * refusal: abandon this step, and with a hosted chain of one that abandoned the
+ * sentence entirely. Unlike speech recognition, translation never gets a second
+ * chance on its own: the next tick re-transcribes the same audio, but a
+ * translation is issued once per committed line, so whatever is lost here is
+ * lost for the rest of the service. The audience is left reading a line of
+ * Chinese they came here precisely because they cannot read.
+ *
+ * So transport errors and 5xx get another attempt; a 4xx (a real refusal —
+ * wrong model, malformed request) still moves straight on.
+ */
+const isTransient = (e) => !e || !e.status || e.status >= 500;
+const TRANSIENT_TRIES = 3;
+const backoff = (n) => new Promise((r) => setTimeout(r, 400 * 2 ** n));
+
 async function askChain(chain, prompt, sys) {
   const errors = [];
   for (const step of chain) {
     const def = LLM_PROVIDERS[step.id];
     if (!def || !(def.kind === "proxy" || step.key || (step.pool && step.pool.size))) continue;
-    const tries = step.pool ? Math.max(1, step.pool.size) : 1;
+    // A pooled step gets one attempt per key (429 rotation); every step also
+    // gets a few attempts at a transient failure, whichever is more.
+    const tries = Math.max(TRANSIENT_TRIES, step.pool ? step.pool.size : 1);
     for (let a = 0; a < tries; a++) {
       const key = step.pool ? step.pool.next() : step.key;
       try {
@@ -718,6 +739,7 @@ async function askChain(chain, prompt, sys) {
       } catch (e) {
         errors.push(`${step.id}: ${e.message}`);
         if (e && e.status === 429 && step.pool) { step.pool.bench(key, e.retryAfter); continue; }
+        if (isTransient(e) && a < tries - 1) { await backoff(a); continue; }
         break;
       }
     }
