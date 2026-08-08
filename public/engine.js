@@ -329,9 +329,18 @@ class Agreement {
     const stable = [];
     const n = Math.min(this.prev.length, words.length);
     for (let i = 0; i < n; i++) {
-      if (normWord(this.prev[i].w) && normWord(this.prev[i].w) === normWord(words[i].w)) {
-        stable.push(words[i]);
-      } else break;
+      const a = normWord(this.prev[i].w);
+      const b = normWord(words[i].w);
+      // A token that normalises to nothing — a bare space, or punctuation on its
+      // own — used to fail the truthiness test and break the whole scan, so
+      // everything after it stayed uncommitted no matter how well it agreed.
+      // Whisper emits exactly such a leading " " token for `language=yue`, which
+      // meant choosing Cantonese produced a session where NO line ever settled:
+      // the audience saw only the provisional tail until the 28 s force-commit.
+      // Two identical empty tokens agree; that is all this needs to say.
+      const same = a === b && (a !== "" || this.prev[i].w === words[i].w);
+      if (same) stable.push(words[i]);
+      else break;
     }
     const cut = stable.length ? stable[stable.length - 1].end : 0;
     this.prev = words.slice(stable.length).map((w) => ({ ...w, start: w.start - cut, end: w.end - cut }));
@@ -533,11 +542,56 @@ export const LANGS = {
   th:        { label: "ไทย",      en: "Thai",      rtl: false, note: "Thai." },
 };
 
-function buildSys(targets) {
-  const list = targets.map((c) => `   - "${c}": ${(LANGS[c] || {}).note || c}`).join("\n");
-  return `You are a professional live interpreter working in real time.
-You receive raw speech-recognition output from a talk that may mix English and Chinese.
+/**
+ * Languages the SPEAKER may be using, as opposed to LANGS which is what the
+ * audience reads. `code` is Whisper's own language code and is sent verbatim;
+ * an empty code means auto-detect.
+ *
+ * Auto-detect exists and is still the default, but it is not neutral: given
+ * Cantonese it reports "Chinese" and transcribes Mandarin, so 今日我哋要睇
+ * comes out as 今日我們要看. Setting `yue` explicitly is the only way to get
+ * Cantonese out of Whisper, which is why this table exists at all rather than
+ * the three hardcoded options it replaced.
+ */
+export const SOURCE_LANGS = {
+  auto: { code: "",    label: "Auto-detect" },
+  en:   { code: "en",  label: "English",    prompt: "English" },
+  zh:   { code: "zh",  label: "普通話 / Mandarin", prompt: "Mandarin Chinese",
+          keep: "Write it in Chinese characters as spoken." },
+  yue:  { code: "yue", label: "廣東話 / Cantonese", prompt: "Cantonese (廣東話)",
+          keep: "Never rewrite it into Mandarin: keep 我哋/我地, 睇, 喺, 嘅, 唔, 咗, 邊個,\n一齊 and every other Cantonese word and particle exactly as they were said." },
+  fa:   { code: "fa",  label: "فارسی / Persian",  prompt: "Persian" },
+  ar:   { code: "ar",  label: "العربية / Arabic", prompt: "Arabic" },
+  ur:   { code: "ur",  label: "اردو / Urdu",      prompt: "Urdu" },
+  ko:   { code: "ko",  label: "한국어 / Korean",   prompt: "Korean" },
+  ja:   { code: "ja",  label: "日本語 / Japanese", prompt: "Japanese" },
+  es:   { code: "es",  label: "Español",          prompt: "Spanish" },
+  fr:   { code: "fr",  label: "Français",         prompt: "French" },
+  id:   { code: "id",  label: "Indonesia",        prompt: "Indonesian" },
+  vi:   { code: "vi",  label: "Tiếng Việt",       prompt: "Vietnamese" },
+  hi:   { code: "hi",  label: "हिन्दी / Hindi",     prompt: "Hindi" },
+  th:   { code: "th",  label: "ไทย / Thai",       prompt: "Thai" },
+};
 
+function buildSys(targets, sourceLang) {
+  const list = targets.map((c) => `   - "${c}": ${(LANGS[c] || {}).note || c}`).join("\n");
+  const src = SOURCE_LANGS[sourceLang];
+  // Naming the spoken language is not decoration. Told only that the talk "may
+  // mix English and Chinese", the correction step rewrote a correctly
+  // transcribed Cantonese sentence into Mandarin — 我哋→我們, 睇→看, 嘅→的 —
+  // so picking Cantonese in the console fixed the transcription and then lost it
+  // again one stage later. `keep` is where a language says what must survive.
+  const note = src && src.code
+    ? `The speaker is speaking ${src.prompt}. The corrected source MUST stay in
+${src.prompt} exactly as spoken — correcting is not translating.${src.keep ? "\n" + src.keep : ""}
+`
+    : `The talk may mix languages. Keep the corrected source in whatever language
+each sentence was actually spoken in; never convert it to another language or
+to a different variety of the same language.
+`;
+  return `You are a professional live interpreter working in real time.
+You receive raw speech-recognition output from a live talk.
+${note}
 1. CORRECT the source: fix ASR errors ONLY (homophones, mis-heard proper nouns,
    missing punctuation, word-boundary mistakes). Use GLOSSARY as ground truth.
    NEVER add, remove, summarise or reorder content.
@@ -1031,7 +1085,7 @@ Reply with JSON only: {"t":"..."}`;
           context: this.cfg.context,
           prior: this.prior.slice(-3).join("\n"),
         });
-        const { raw, via } = await askChain(this.cfg.llmChain, prompt, buildSys(this.cfg.targets));
+        const { raw, via } = await askChain(this.cfg.llmChain, prompt, buildSys(this.cfg.targets, this.cfg.language));
         const out = parseJson(raw) || {};
         const corrected = String(out.corrected || source).trim();
         this.prior.push(corrected);

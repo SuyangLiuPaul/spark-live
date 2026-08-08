@@ -87,10 +87,10 @@ const wavBlob = (pcm) => {
 };
 
 /** Run the real engine over a PCM buffer and report what came out. */
-async function runEngine(pcm, { seconds = 16 } = {}) {
+async function runEngine(pcm, { seconds = 16, language = "auto" } = {}) {
   const seen = { lines: [], errors: [] };
   const eng = new LiveEngine({
-    proxy: true, targets: ["prs"], language: "auto", llmChain: [{ id: "proxy" }],
+    proxy: true, targets: ["prs"], language, llmChain: [{ id: "proxy" }],
   }).events({
     line: (l) => seen.lines.push(l),
     error: (e) => seen.errors.push(String(e && e.message || e)),
@@ -209,7 +209,27 @@ await section("silence still skipped", async () => {
   check("empty room makes no ASR calls", r.asrCalls === 0, `asr=${r.asrCalls} skipped=${r.skipped}`);
 });
 
-/* ═══ 6. the relay survives a presenter reload ═══
+/* ═══ 6. Cantonese survives both stages ═══
+   Two independent failures conspired here. Whisper's auto-detect reports
+   Cantonese as "Chinese" and writes Mandarin (我哋要睇 → 我們要看), so the
+   variety has to be selected explicitly; and with language=yue Whisper emits a
+   leading " " token, which broke LocalAgreement's scan at position 0 so NO line
+   ever settled — the room would have watched a provisional tail all service. */
+await section("Cantonese", async () => {
+  const CANTO = readWav(path.join(HERE, "fixtures", "cantonese-16k.wav"));
+  const r = await runEngine(CANTO, { seconds: 14, language: "yue" });
+  check("yue commits settled lines", r.lines.length > 0,
+        `asr=${r.asrCalls} lines=${r.lines.length}` + (r.errors.length ? ` errors=${JSON.stringify(r.errors.slice(0, 2))}` : ""));
+
+  const src = r.lines.map((l) => l.src || "").join(" ");
+  const kept = ["我哋", "我地", "睇", "喺", "嘅", "一齊"].filter((m) => src.includes(m));
+  check("the transcript stays Cantonese", kept.length >= 3, `kept ${JSON.stringify(kept)}`);
+  check("it is not rewritten as Mandarin", !/我們|要看|喺呢度$/.test(src) || kept.length >= 3,
+        src.slice(0, 60));
+  check("Cantonese is still translated", r.translated.length > 0, `${r.translated.length} translated`);
+});
+
+/* ═══ 7. the relay survives a presenter reload ═══
    A reload republished v=1 over a stored v=40 (freezing every phone), and
    published an empty idle document (blanking every phone). Both are asserted,
    along with the fact that Stop can still legitimately end a session. */

@@ -1,4 +1,4 @@
-import { LiveEngine, LANGS, listInputs, buildLlmChain } from "./engine.js";
+import { LiveEngine, LANGS, SOURCE_LANGS, listInputs, buildLlmChain } from "./engine.js";
 import { t, applyI18n, mountUiSwitch } from "./i18n.js";
 import { createPublisher } from "./channel.js";
 import { createWakeLock, createConnection, createToast, micErrorMessage, createReporter } from "./resilience.js";
@@ -72,6 +72,14 @@ $("openBtn").onclick = () => window.open(`./view.html?s=${session}`, "_blank");
 
 /* ── settings: config.js defaults → localStorage overrides → live edits ── */
 const CFG = window.SPARK_LIVE_CONFIG || {};
+
+// Built from SOURCE_LANGS rather than hardcoded in the markup, so adding a
+// speaker language is one table entry. Must run before the restore loop below,
+// or a saved choice has no matching <option> to select.
+$("lang").innerHTML = Object.entries(SOURCE_LANGS)
+  .map(([code, d]) => `<option value="${code}"${code === "auto" ? ' data-i18n="srcAuto"' : ""}>${
+    code === "auto" ? "Auto-detect" : d.label}</option>`).join("");
+
 // A pre-configured pool arrives as an array; the extra keys fill the textarea.
 const PRESET_POOL = Array.isArray(CFG.groqKeys) ? CFG.groqKeys.filter(Boolean) : [];
 for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "geminiKey", "kimiKey", "glmKey", "lang"]) {

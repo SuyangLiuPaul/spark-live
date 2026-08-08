@@ -128,10 +128,12 @@
         <div class="field">
           <label for="lang" data-i18n="srcLangLabel">Source language</label>
           <select id="lang">
-            <option value="auto" data-i18n="srcAuto">Auto-detect (mixed EN/Chinese)</option>
-            <option value="en" data-i18n="srcEn">English</option>
-            <option value="zh" data-i18n="srcZh">Chinese</option>
+            <!-- Populated from SOURCE_LANGS in engine.js — see presenter.js.
+                 Auto-detect cannot produce Cantonese: Whisper reports it as
+                 "Chinese" and writes Mandarin, so the speaker's variety has to
+                 be selectable. -->
           </select>
+          <div class="hint" data-i18n="srcLangHint">Pick the variety the speaker uses. Auto-detect writes Cantonese as Mandarin.</div>
         </div>
         <div class="field">
           <label for="context" data-i18n="contextLabel">Session context (for the AI)</label>
