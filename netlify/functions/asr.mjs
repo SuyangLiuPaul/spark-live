@@ -53,7 +53,11 @@ export default async (req) => {
     const detail = await res.text().catch(() => "");
     return json({ error: "upstream", status: res.status, detail: detail.slice(0, 300) }, res.status);
   }
-  return json(await res.json());
+  try {
+    return json(await res.json());
+  } catch (e) {
+    return json({ error: "bad_upstream_json", detail: String(e.message || e).slice(0, 160) }, 502);
+  }
 };
 
 export const config = { path: "/api/asr" };

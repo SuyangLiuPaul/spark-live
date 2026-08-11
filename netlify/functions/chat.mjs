@@ -50,7 +50,15 @@ export default async (req) => {
     return json({ error: "upstream", status: res.status, detail: detail.slice(0, 300) }, res.status);
   }
 
-  const data = await res.json();
+  // Groq answering 200 with a body that isn't JSON is rare but real (an edge
+  // error page in front of the API). Parsing it unguarded throws, and an
+  // exception here is another 502 for the room to look at.
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    return json({ error: "bad_upstream_json", detail: String(e.message || e).slice(0, 160) }, 502);
+  }
   return json({ content: data?.choices?.[0]?.message?.content || "" });
 };
 

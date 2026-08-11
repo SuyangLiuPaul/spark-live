@@ -76,8 +76,21 @@ export async function withKeys(run, kind) {
     return { error: "not_configured", status: 503 };
   }
   let last = null;
+  let threw = null;
   for (const key of usable(keys)) {
-    const res = await run(key);
+    // `run` is a fetch to Groq, and a fetch REJECTS on a transport failure —
+    // a reset connection, a DNS hiccup — rather than resolving with a status.
+    // Unhandled, that exception escapes the whole handler and Netlify answers
+    // 502, which is what the presenter's phone reported as "translate_failed
+    // 502" mid-service. Worse, it abandoned the request outright: the other
+    // seven keys, any of which might have connected, were never tried.
+    let res;
+    try {
+      res = await run(key);
+    } catch (e) {
+      threw = e;
+      continue;                                     // transport, not this key's fault
+    }
     if (kind) await recordLimits(kind, key, res);   // a 429 carries the header too
     if (res.ok) {
       cooldown.delete(key);
@@ -93,6 +106,12 @@ export async function withKeys(run, kind) {
     }
     if (res.status >= 500) continue;
     break;
+  }
+  // Every key failed to even connect: report it as a normal upstream error so
+  // the caller sees JSON it can act on, instead of a 502 with nothing in it.
+  if (!last && threw) {
+    return { error: "upstream_unreachable", status: 503,
+             detail: String(threw && threw.message || threw).slice(0, 200) };
   }
   return { res: last };
 }
