@@ -108,6 +108,19 @@ export function micErrorMessage(err, t) {
   return (err?.message || String(err)).slice(0, 200);
 }
 
+/* Wallet extensions (MetaMask, Coinbase Wallet, Phantom, ...) and plenty of
+   ad-blockers inject a content script into every page a tab opens, whether
+   or not that page ever touches web3. When the injected script throws with
+   nothing on our side involved, the browser still fires the event on our
+   page, so unhandledrejection capture below would otherwise mail it to us
+   as if it were a Spark Live bug. Match the origin generically — the
+   defect class is "extension-injected code", not any one wallet's ID. */
+const EXTENSION_MARKERS = ["chrome-extension://", "moz-extension://", "safari-web-extension://", "extension://"];
+export function isExtensionOrigin(text) {
+  const s = String(text || "");
+  return EXTENSION_MARKERS.some((marker) => s.includes(marker));
+}
+
 /* ── incident reporting ───────────────────────────────────────────────
    Sends only service-affecting failures to /api/errorReport, which emails
    them. Fire-and-forget and never awaited by a caller: a broken reporter

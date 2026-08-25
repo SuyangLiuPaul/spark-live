@@ -1,7 +1,7 @@
 import { LiveEngine, LANGS, SOURCE_LANGS, listInputs, buildLlmChain } from "./engine.js";
 import { t, applyI18n, mountUiSwitch } from "./i18n.js";
 import { createPublisher } from "./channel.js";
-import { createWakeLock, createConnection, createToast, micErrorMessage, createReporter } from "./resilience.js";
+import { createWakeLock, createConnection, createToast, micErrorMessage, createReporter, isExtensionOrigin } from "./resilience.js";
 
 const $ = (id) => document.getElementById(id);
 const LS = {
@@ -682,6 +682,7 @@ window.addEventListener("error", (e) => {
     `${e.filename || ""}:${e.lineno || ""}\n${e.error?.stack || ""}`);
 });
 window.addEventListener("unhandledrejection", (e) => {
-  reporter.report("uncaught", "unhandled promise rejection",
-    String(e.reason?.stack || e.reason || "").slice(0, 2000));
+  const detail = String(e.reason?.stack || e.reason || "").slice(0, 2000);
+  if (isExtensionOrigin(detail)) return;   // wallet/ad-blocker noise, not our bug
+  reporter.report("uncaught", "unhandled promise rejection", detail);
 });

@@ -1,6 +1,6 @@
 import { subscribe } from "./channel.js";
 import { t, applyI18n, mountUiSwitch } from "./i18n.js";
-import { createWakeLock, createToast, createReporter } from "./resilience.js";
+import { createWakeLock, createToast, createReporter, isExtensionOrigin } from "./resilience.js";
 
 const $ = (id) => document.getElementById(id);
 // `/join/CODE` is a 200 rewrite, so the browser URL keeps the path and carries
@@ -173,8 +173,9 @@ window.addEventListener("error", (e) => {
     `${e.filename || ""}:${e.lineno || ""}\n${e.error?.stack || ""}`);
 });
 window.addEventListener("unhandledrejection", (e) => {
-  reporter.report("viewer_broken", "unhandled rejection in audience view",
-    String(e.reason?.stack || e.reason || "").slice(0, 2000));
+  const detail = String(e.reason?.stack || e.reason || "").slice(0, 2000);
+  if (isExtensionOrigin(detail)) return;   // wallet/ad-blocker noise, not our bug
+  reporter.report("viewer_broken", "unhandled rejection in audience view", detail);
 });
 
 let wasOffline = false;
