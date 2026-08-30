@@ -140,6 +140,21 @@
           <textarea id="context" class="short" data-i18n-ph="contextPh"></textarea>
         </div>
       </div>
+      <div class="field">
+        <label for="asrEngine" data-i18n="asrLabel">Speech recognition</label>
+        <select id="asrEngine">
+          <option value="whisper">Whisper (Groq)</option>
+          <option value="gemini">Gemini 3.5 Transcribe Live</option>
+        </select>
+        <!-- Gemini needs a key in THIS browser: the Live API is a WebSocket the
+             page holds open, and ephemeral tokens were rejected by the endpoint
+             when this was built (see gemini-asr.js). presenter.js disables the
+             option until a Gemini key is present. -->
+        <!-- No data-i18n here on purpose: this line has two states (key / no
+             key) and syncAsrOption() owns its text. A data-i18n attribute would
+             let applyI18n overwrite whichever state was showing. -->
+        <div class="hint" id="asrHint">Gemini keeps Cantonese verbatim instead of rewriting it as Mandarin, and needs a Gemini key below.</div>
+      </div>
     </section>
 
     <section class="settings-group">

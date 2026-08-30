@@ -82,7 +82,7 @@ $("lang").innerHTML = Object.entries(SOURCE_LANGS)
 
 // A pre-configured pool arrives as an array; the extra keys fill the textarea.
 const PRESET_POOL = Array.isArray(CFG.groqKeys) ? CFG.groqKeys.filter(Boolean) : [];
-for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "geminiKey", "kimiKey", "glmKey", "lang"]) {
+for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "geminiKey", "kimiKey", "glmKey", "lang", "asrEngine"]) {
   const el = $(id);
   const saved = LS.get(id);
   const preset = id === "groqKeys2" ? PRESET_POOL.slice(1).join("\n")
@@ -92,6 +92,25 @@ for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "gemin
   el.addEventListener("change", () => { LS.set(id, el.value); if (id.startsWith("groq")) readiness(); });
   el.addEventListener("blur", () => LS.set(id, el.value));
 }
+
+/* Streaming ASR opens its WebSocket from THIS page, so it is only selectable
+   when this browser holds a Gemini key. Leaving the option enabled without one
+   would quietly run Whisper instead — the presenter would be told they had
+   picked Gemini and get Whisper's Cantonese, which is the exact failure this
+   was meant to fix. Disable it and say why instead. */
+function syncAsrOption() {
+  const sel = $("asrEngine");
+  if (!sel) return;
+  const hasKey = !!$("geminiKey").value.trim();
+  const opt = sel.querySelector('option[value="gemini"]');
+  if (opt) opt.disabled = !hasKey;
+  if (!hasKey && sel.value === "gemini") { sel.value = "whisper"; LS.set("asrEngine", "whisper"); }
+  const hint = $("asrHint");
+  if (hint) hint.textContent = hasKey ? t("asrHintReady") : t("asrHintNeedKey");
+}
+$("geminiKey").addEventListener("input", syncAsrOption);
+$("asrEngine").addEventListener("change", syncAsrOption);
+syncAsrOption();
 
 /** True when the site carries a server-side key pool (hosted, no key entry). */
 const HOSTED = !!CFG.proxy;
@@ -240,9 +259,22 @@ function readLocalMirror() {
 }
 
 /* ── target languages ── */
-const DEFAULT_TARGETS = ["prs", "en"];
+const DEFAULT_TARGETS = ["zh-Hans", "prs", "vi"];
+// Changing the default alone would NOT have reached anyone: `targets` is read
+// from localStorage first, so every presenter who had already run a service
+// would have kept their old set (the last real service ran en/vi/zh-Hans) and
+// the change would look like it silently did nothing. The stamp forces exactly
+// one reset onto the new default, after which the picker is theirs again.
+const TARGETS_STAMP = "2026-08-17-zh-prs-vi";
 let targets = (() => {
-  try { const v = JSON.parse(LS.get("targets") || "null"); if (Array.isArray(v) && v.length) return v.slice(0, 3); } catch {}
+  try {
+    if (LS.get("targetsStamp") === TARGETS_STAMP) {
+      const v = JSON.parse(LS.get("targets") || "null");
+      if (Array.isArray(v) && v.length) return v.slice(0, 3);
+    }
+  } catch {}
+  LS.set("targetsStamp", TARGETS_STAMP);
+  LS.set("targets", JSON.stringify(DEFAULT_TARGETS));
   return DEFAULT_TARGETS.slice();
 })();
 function renderLangPick() {
@@ -346,6 +378,7 @@ function renderPreviewLang() {
 }
 window.addEventListener("ui:lang", () => {
   applyI18n(); renderLangPick(); renderPreviewLang(); readiness();
+  syncAsrOption();   // its hint has two states, so applyI18n cannot own it
   $("copyBtn").textContent = t("copyLink");
   if (doc.lines.length) renderLines();
 });
@@ -496,6 +529,11 @@ async function beginCapture({ resume = false } = {}) {
 
   engine = new LiveEngine({
     groqKey: groqKeys[0], groqKeys, proxy: useProxy, deviceId: micId, llmChain, targets,
+    // Streaming ASR only when this browser actually holds a Gemini key; the
+    // engine falls back to Whisper on its own if the socket is ever rejected,
+    // so a bad key degrades the transcript rather than ending the service.
+    asr: $("asrEngine").value === "gemini" && $("geminiKey").value.trim() ? "gemini" : "whisper",
+    geminiKey: $("geminiKey").value.trim(),
     language: $("lang").value,
     glossary: $("glossary").value.trim(),
     context: $("context").value.trim(),

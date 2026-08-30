@@ -18,7 +18,16 @@
  *      errors against the glossary AND translates to Dari in a single call
  *      (one round-trip, and the corrector's output is what gets translated, so
  *      errors don't compound).
+ *
+ * Steps 1–2 have a second implementation: `asr: "gemini"` streams to Gemini
+ * Live instead, which finalizes segments server-side and so needs neither the
+ * tick nor LocalAgreement. Step 3 onwards is shared — the Gemini path hands
+ * finalized text to the same _commit(), so sentence assembly, translation,
+ * relay publishing and the archive are identical either way. It requires the
+ * presenter's own key (see gemini-asr.js for why hosted mode cannot use it).
  */
+
+import { GeminiLiveAsr } from "./gemini-asr.js";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -524,7 +533,19 @@ function shapeAsr(data) {
  * gets register/variant right (Dari ≠ Iranian Farsi is the one that matters most).
  */
 export const LANGS = {
-  prs:       { label: "دری",      en: "Dari",      rtl: true,  note: "Dari (دری, Afghan Persian). Use Afghan vocabulary and idiom, NOT Iranian Farsi." },
+  // The bare instruction "use Afghan vocabulary, NOT Iranian Farsi" was measured
+  // on 2026-08-17 and does NOT work: gpt-oss-120b scored 0/4, 2/4, 0/4 over three
+  // runs on the standard register probe and shipped plain Iranian Farsi
+  // (بیمارستان / دانشگاه / خیابان / ماشین) to an Afghan congregation. A negative
+  // instruction with no examples is not enough. Naming four concrete pairs took
+  // the same model to 4/4, 4/4, 4/4 at no extra latency — so the examples stay,
+  // and the final line is what generalises them beyond these four words.
+  prs:       { label: "دری",      en: "Dari",      rtl: true,  note:
+    "Dari (دری, Afghan Persian) for an AFGHAN audience.\n"
+    + "     You MUST use the Afghan word, never the Iranian one:\n"
+    + "       hospital = شفاخانه (not بیمارستان)   university = پوهنتون (not دانشگاه)\n"
+    + "       street = سرک (not خیابان)            car = موتر (not ماشین)\n"
+    + "     Apply the same Afghan preference to every other word and idiom." },
   ps:        { label: "پښتو",     en: "Pashto",    rtl: true,  note: "Pashto." },
   fa:        { label: "فارسی",    en: "Farsi",     rtl: true,  note: "Iranian Persian (Farsi)." },
   ar:        { label: "العربية",  en: "Arabic",    rtl: true,  note: "Modern Standard Arabic." },
@@ -784,6 +805,10 @@ export class LiveEngine {
       // (當日→當然), avoided a garbled run, and ADDS PUNCTUATION (which the
       // sentence splitter below depends on) for ~0.1 s more on a 25 s window.
       groqKey: "", groqKeys: [], proxy: false, deviceId: "", groqModel: "whisper-large-v3", language: "auto",
+      // "whisper" (windowed Groq, works hosted) | "gemini" (streaming, needs
+      // geminiKey in this browser). Anything unusable silently stays on
+      // whisper — a missing key must never take the service off the air.
+      asr: "whisper", geminiKey: "",
       llmChain: [],            // ordered [{id, key, model?, base?}]; groq steps get the pool
       targets: ["prs"],        // audience languages, first = primary
       interim: true,           // cheap provisional translation of the live tail
@@ -822,8 +847,13 @@ export class LiveEngine {
     for (const step of this.cfg.llmChain || []) {
       if ((step.id === "groq" || step.id === "groqHi") && !step.pool && chatPool.size) step.pool = chatPool;
     }
-    if (!this.cfg.proxy && !this.pool.size) throw new Error("missing_asr_key");
+    // Streaming ASR replaces the Groq audio pool, not the chat chain: the LLM
+    // still corrects and translates every settled sentence.
+    this.useGemini = this.cfg.asr === "gemini" && !!this.cfg.geminiKey;
+    if (!this.useGemini && !this.cfg.proxy && !this.pool.size) throw new Error("missing_asr_key");
     if (!this.cfg.llmChain || !this.cfg.llmChain.length) throw new Error("missing_llm_key");
+
+    if (this.useGemini) this._startGemini();
 
     this.cap = new Capture((chunk, rate) => this._audio(chunk, rate));
     this.cap.deviceId = this.cfg.deviceId || "";
@@ -847,9 +877,49 @@ export class LiveEngine {
     this.on.status({ running: true });
   }
 
+  /**
+   * Streaming ASR. The server finalizes segments itself, so there is no tick and
+   * no LocalAgreement here — a finalized segment goes straight into the same
+   * _commit() the Whisper path feeds, and everything downstream is unchanged.
+   */
+  _startGemini() {
+    this.gasr = new GeminiLiveAsr({
+      key: this.cfg.geminiKey,
+      language: this.cfg.language === "auto" ? "" : this.cfg.language,
+      // The glossary becomes ASR BIAS rather than post-hoc correction. The text
+      // glossary could only ever fire on a term already spelled correctly —
+      // exactly when it was not needed; as customVocabulary it applies first.
+      glossary: this.cfg.glossary,
+      onInterim: (t) => {
+        this._gInterim = t;
+        const tail = ((this.sentence || "") + " " + t).replace(/\s+/g, " ").trim();
+        this.on.draft(tail);
+        this._interim(tail);
+      },
+      onFinal: (t) => {
+        this._gInterim = "";
+        this.asrCalls = (this.asrCalls || 0) + 1;
+        this.lastAsrAt = Date.now();
+        this._commit(t);
+        this.on.draft((this.sentence || "").trim());
+      },
+      onStatus: (s) => this.on.status({ running: true, asr: "gemini", ...s }),
+      onError: (e) => {
+        // Losing streaming ASR mid-sermon must not end the service: fall back to
+        // the Whisper path, which needs only the tick that is already running.
+        this.useGemini = false;
+        this.gasr = null;
+        this.on.status({ running: true, asr: "whisper", fellBack: true });
+        this.on.error(e);
+      },
+    });
+    this.gasr.start();
+  }
+
   stop() {
     this.running = false;
     clearInterval(this.timer);
+    this.gasr && this.gasr.stop();
     this.cap && this.cap.stop();
     this.on.status({ running: false });
   }
@@ -862,8 +932,15 @@ export class LiveEngine {
       this.on.status({ running: true, stalled: false });
     }
     const pcm = resampleTo16k(chunk, rate);
-    this.buf.push(pcm);
-    this.bufLen += pcm.length;
+    // Streaming ASR consumes audio as it arrives, so the overlapping-window
+    // buffer would only grow forever. Everything below — archive, level meter,
+    // stall watchdog — is shared and still runs.
+    if (this.useGemini && this.gasr) {
+      this.gasr.push(pcm);
+    } else {
+      this.buf.push(pcm);
+      this.bufLen += pcm.length;
+    }
     // Raw PCM is only retained where the browser gave us no MediaRecorder, and
     // even then it is bounded: unbounded retention is what put 659 MB in a
     // three-hour tab. A truncated archive is a far smaller loss than a session
@@ -893,6 +970,19 @@ export class LiveEngine {
   /** Fire a confirm pass when one is due, whatever woke us. */
   _maybeTick() {
     if (!this.running || this.busy) return;
+    // Streaming ASR: _tick() would return immediately (the overlap buffer is
+    // empty by design), and the trailing-fragment flush lives inside it — so
+    // without this a last part-sentence would sit unsent until Stop. Waiting
+    // for `!_gInterim` avoids cutting a sentence the server is still forming;
+    // MAX_UNIT_WAIT_MS is the backstop for a speaker who never pauses.
+    if (this.useGemini) {
+      if (this.sentence.trim()) {
+        const quiet = Date.now() - this.lastVoiceAt > SILENCE_FLUSH_MS;
+        const stale = this.pendingSince && Date.now() - this.pendingSince > MAX_UNIT_WAIT_MS;
+        if ((quiet && !this._gInterim) || stale) this._flushSentence();
+      }
+      return;
+    }
     // A drained pool refills continuously (~43 s per whisper request), so the
     // right response is to wait it out, not to keep firing every 2.2 s — that
     // spends nothing but latency and buries the console in identical errors.
