@@ -49,6 +49,12 @@ const MAX_VOCAB = 1000;              // API cap
 // than both, so reconnection is normal operation, not error handling.
 const RECONNECT_MS = 800;
 const MAX_BACKOFF_MS = 8000;
+// Consecutive failures with no session in between before giving up and letting
+// the engine fall back to Whisper. With the backoff above this is roughly 25 s
+// of dead transcript — long enough to ride out a WiFi blip, short enough that a
+// sermon does not finish in silence. Reset by every setupComplete, so the
+// ordinary ~12-minute reconnect never counts toward it.
+const MAX_CONSECUTIVE_FAILS = 6;
 // Audio captured while the socket is down. Replayed on reconnect — verified
 // safe because feeding at 5x realtime produced byte-identical transcripts.
 const GAP_MAX_SAMPLES = 16000 * 90;
@@ -118,6 +124,7 @@ export class GeminiLiveAsr {
     this.pending = new Float32Array(0);
     this.backoff = RECONNECT_MS;
     this.reconnects = 0;
+    this.fails = 0;
     this.finals = 0;
   }
 
@@ -196,6 +203,7 @@ export class GeminiLiveAsr {
       if (m.setupComplete) {
         this.connected = true;
         this.backoff = RECONNECT_MS;
+        this.fails = 0;
         this.o.onStatus && this.o.onStatus({ connected: true, resumed: !!this.handle });
         this._drainGap();
         return;
@@ -243,10 +251,22 @@ export class GeminiLiveAsr {
 
   _retry(err, code) {
     this.reconnects++;
+    this.fails++;
     // A key problem will not fix itself by reconnecting, and retrying forever
     // would hide it behind a silent stream of failures.
     if (code === 1007 || code === 1008) {
       this.o.onError && this.o.onError(new Error("asr_auth_rejected"));
+      this.closed = true;
+      return;
+    }
+    // Neither will anything else that keeps failing. Only 1007/1008 used to end
+    // this loop, so ANY other persistent fault — a spent balance (which arrives
+    // as a quota error, not an auth one, and through the relay as a plain 1011),
+    // a dead relay, a blocked origin — reconnected forever while the presenter
+    // watched "reconnecting…" and no transcript. Whisper was available the whole
+    // time. Measured before this guard: 8 reconnects in 40 s, never gave up.
+    if (this.fails >= MAX_CONSECUTIVE_FAILS) {
+      this.o.onError && this.o.onError(new Error(`asr_unreachable_${code || "?"}`));
       this.closed = true;
       return;
     }
