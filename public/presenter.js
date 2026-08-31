@@ -129,6 +129,14 @@ function syncAsrOption() {
   const hint = $("asrHint");
   if (hint) hint.textContent = ASR_RELAY ? t("asrHintRelay")
                              : usable ? t("asrHintReady") : t("asrHintNeedKey");
+  // The source-language advice depends on the engine too. Measured 2026-08-31
+  // on the same Cantonese: auto-detect through Gemini kept 12 Cantonese-only
+  // characters against 11 when the language was named — it does NOT flatten to
+  // Mandarin the way Whisper does. Telling presenters otherwise would push them
+  // to change a setting that is already right.
+  const srcHint = $("srcLangHint");
+  if (srcHint) srcHint.textContent = sel.value === "gemini" ? t("srcLangHint")
+                                                            : t("srcLangHintWhisper");
 }
 $("geminiKey").addEventListener("input", syncAsrOption);
 $("asrEngine").addEventListener("change", syncAsrOption);

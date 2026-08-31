@@ -133,7 +133,11 @@
                  "Chinese" and writes Mandarin, so the speaker's variety has to
                  be selectable. -->
           </select>
-          <div class="hint" data-i18n="srcLangHint">Pick the variety the speaker uses. Auto-detect writes Cantonese as Mandarin.</div>
+          <!-- No data-i18n on purpose: this line has two states (Gemini keeps
+               Cantonese under auto-detect, Whisper does not) and syncAsrOption()
+               owns its text. A data-i18n attribute would let applyI18n
+               overwrite whichever state was showing. -->
+          <div class="hint" id="srcLangHint">Auto is fine with Gemini — measured on real Cantonese it kept the Cantonese instead of rewriting it as Mandarin.</div>
         </div>
         <div class="field">
           <label for="context" data-i18n="contextLabel">Session context (for the AI)</label>
