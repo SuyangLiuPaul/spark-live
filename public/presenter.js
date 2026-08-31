@@ -96,11 +96,27 @@ for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "gemin
   el.addEventListener("blur", () => LS.set(id, el.value));
 }
 
+/* Gemini is the DEFAULT engine as of 2026-08-31. Measured on the same 120 s of
+   real Cantonese, Whisper wrote 「他是需要想的」 where the speaker said
+   「佢係需要唞嘅」, so Whisper-by-default was shipping the congregation the worse
+   transcript unless someone remembered to switch.
+
+   Changing the markup order alone would reach nobody: the restore loop above
+   reads localStorage first, so every presenter who has ever run a service keeps
+   "whisper" forever. One stamped reset moves them across, after which the
+   choice is theirs again — the same reason TARGETS_STAMP exists. */
+const ASR_STAMP = "2026-08-31-gemini-default";
+if (LS.get("asrStamp") !== ASR_STAMP) {
+  LS.set("asrStamp", ASR_STAMP);
+  $("asrEngine").value = "gemini";
+  LS.set("asrEngine", "gemini");
+}
+
 /* Streaming ASR opens its WebSocket from THIS page, so it is only selectable
-   when this browser holds a Gemini key. Leaving the option enabled without one
-   would quietly run Whisper instead — the presenter would be told they had
-   picked Gemini and get Whisper's Cantonese, which is the exact failure this
-   was meant to fix. Disable it and say why instead. */
+   when there is a relay to reach or a key in this browser. Leaving the option
+   enabled without either would quietly run Whisper instead — the presenter
+   would be told they had picked Gemini and get Whisper's Cantonese, which is
+   the exact failure this was meant to fix. Disable it and say why instead. */
 function syncAsrOption() {
   const sel = $("asrEngine");
   if (!sel) return;
