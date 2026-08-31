@@ -1,0 +1,16 @@
+name = "spark-live-asr"
+main = "worker.js"
+compatibility_date = "2026-08-17"
+
+# No bindings, no storage, no KV. This Worker holds one socket and copies
+# frames between two of them; anything else it kept would be another thing to
+# secure. GEMINI_API_KEY is a SECRET, set with `wrangler secret put` — never
+# put it in this file, which is committed.
+
+# Which sites may open a relay socket. Not secret, so it lives here rather than
+# in the secret store. Leave it out and any origin is accepted.
+[vars]
+ALLOWED_ORIGINS = "https://spark-live-translate.netlify.app,https://spark-live-dev.netlify.app"
+
+[observability]
+enabled = true

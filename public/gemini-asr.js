@@ -9,15 +9,22 @@
    where Whisper wrote 丁痕, and stayed in Traditional throughout instead of
    mixing scripts. Different enough to be worth a second ASR backend.
 
-   WHY THE PRESENTER'S OWN KEY
+   TWO WAYS TO CONNECT
    The Live API is a WebSocket the browser must hold, and a Netlify function
    cannot hold one. Google's answer is ephemeral tokens, and they are minted
    fine — but on 2026-08-17 the Live endpoint REJECTED every documented way of
    presenting one (?access_token=, ?key=, Authorization: Token, x-goog-api-key,
    on both v1alpha and v1beta) while the real key connected on the first try.
-   Until that gap closes this path only runs in own-key mode, where a key in the
-   presenter's own browser is the app's existing, deliberate design. Hosted mode
-   stays on Whisper. Revisit the token path before assuming this is permanent.
+   So there are two supported shapes, and `relay` picks between them:
+
+     relay set   → connect to the Cloudflare Worker in ../relay, which holds the
+                   key server-side. The page needs NO key, which is what makes a
+                   zero-setup site for the congregation possible.
+     no relay    → connect straight to Google with the presenter's own key, the
+                   app's existing own-key design. Works today, one device at a
+                   time.
+
+   Revisit the token path before assuming the relay is permanent.
 
    MODE IS VERBATIM, DELIBERATELY
    SMART mode formats better and fixes the spacing artifact below, but measured
@@ -88,7 +95,9 @@ export function vocabFrom(glossary) {
 export class GeminiLiveAsr {
   /**
    * @param {object} o
-   * @param {string} o.key       presenter's own Gemini API key
+   * @param {string} o.relay     wss:// URL of the relay Worker. When set the
+   *                             key is NOT needed and never leaves the server.
+   * @param {string} o.key       presenter's own Gemini API key (relay-less mode)
    * @param {string} o.language  SOURCE_LANGS id ("yue"), "" / "auto" to detect
    * @param {string} o.glossary  becomes customVocabulary — the ASR is biased
    *                             toward these BEFORE mishearing them, unlike the
@@ -152,7 +161,11 @@ export class GeminiLiveAsr {
     if (this.closed) return;
     let ws;
     try {
-      ws = new WebSocket(`${WS_BASE}?key=${encodeURIComponent(this.o.key)}`);
+      // The relay URL is used verbatim — it may already carry ?code=, and the
+      // key belongs on the far side of it, never here.
+      ws = new WebSocket(this.o.relay
+        ? this.o.relay
+        : `${WS_BASE}?key=${encodeURIComponent(this.o.key)}`);
     } catch (e) {
       this._retry(e);
       return;
@@ -164,8 +177,19 @@ export class GeminiLiveAsr {
     };
 
     ws.onmessage = async (ev) => {
+      // Gemini replies in BINARY frames, so this is never a plain string in
+      // practice. Which flavour of binary depends on the socket's binaryType,
+      // which differs between browsers and the relay hop — handle both rather
+      // than discover the difference on a Sunday.
       let raw = ev.data;
       if (raw instanceof Blob) raw = await raw.text();
+      else if (raw instanceof ArrayBuffer) raw = new TextDecoder().decode(raw);
+      // NOT `raw.buffer` — a view is a window onto a larger, possibly pooled
+      // buffer, and decoding the whole thing yields garbage that JSON.parse
+      // rejects silently. The offset and length are the whole point.
+      else if (ArrayBuffer.isView(raw)) {
+        raw = new TextDecoder().decode(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength));
+      }
       let m;
       try { m = JSON.parse(raw); } catch { return; }
 

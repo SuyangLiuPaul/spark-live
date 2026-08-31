@@ -69,7 +69,13 @@ echo
 echo "── post-deploy check ──"
 for host in spark-live-translate spark-live-dev; do
   cfg=$(curl -s -m 20 "https://$host.netlify.app/config.js" || true)
-  keys=$(printf '%s' "$cfg" | grep -coE 'gsk_[A-Za-z0-9]{20,}' || true)
+  keys=$(printf '%s' "$cfg" | grep -coE 'gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,}' || true)
   proxy=$(printf '%s' "$cfg" | grep -c 'proxy' || true)
-  printf "  %-22s keys=%s  proxy-mode=%s\n" "$host" "$keys" "$([ "$proxy" -gt 0 ] && echo yes || echo NO)"
+  # An empty asrRelay does not fail anything — it just silently disables the
+  # Gemini option for every visitor, which is the sort of thing you discover
+  # mid-service. Assert it landed.
+  relay=$(printf '%s' "$cfg" | grep -coE 'asrRelay:[[:space:]]*"wss://[^"]+"' || true)
+  printf "  %-22s keys=%s  proxy-mode=%s  relay=%s\n" "$host" "$keys" \
+    "$([ "$proxy" -gt 0 ] && echo yes || echo NO)" \
+    "$([ "$relay" -gt 0 ] && echo yes || echo NO)"
 done

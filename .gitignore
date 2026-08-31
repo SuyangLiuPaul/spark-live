@@ -4,3 +4,6 @@ public/config.js
 node_modules/
 .netlify/
 .DS_Store
+
+# Wrangler's local build/state cache for the relay Worker
+relay/.wrangler/

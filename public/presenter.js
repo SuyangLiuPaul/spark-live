@@ -72,6 +72,9 @@ $("openBtn").onclick = () => window.open(`./view.html?s=${session}`, "_blank");
 
 /* ── settings: config.js defaults → localStorage overrides → live edits ── */
 const CFG = window.SPARK_LIVE_CONFIG || {};
+// Relay URL for Gemini streaming ASR. Not a secret (the key lives in the
+// Worker), so it ships in config.js like any other setting.
+const ASR_RELAY = String(CFG.asrRelay || "").trim();
 
 // Built from SOURCE_LANGS rather than hardcoded in the markup, so adding a
 // speaker language is one table entry. Must run before the restore loop below,
@@ -101,12 +104,15 @@ for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "gemin
 function syncAsrOption() {
   const sel = $("asrEngine");
   if (!sel) return;
-  const hasKey = !!$("geminiKey").value.trim();
+  // Two ways to be usable. The relay is the one that makes a zero-setup site
+  // possible: the key lives in the Worker, so nobody types anything here.
+  const usable = !!ASR_RELAY || !!$("geminiKey").value.trim();
   const opt = sel.querySelector('option[value="gemini"]');
-  if (opt) opt.disabled = !hasKey;
-  if (!hasKey && sel.value === "gemini") { sel.value = "whisper"; LS.set("asrEngine", "whisper"); }
+  if (opt) opt.disabled = !usable;
+  if (!usable && sel.value === "gemini") { sel.value = "whisper"; LS.set("asrEngine", "whisper"); }
   const hint = $("asrHint");
-  if (hint) hint.textContent = hasKey ? t("asrHintReady") : t("asrHintNeedKey");
+  if (hint) hint.textContent = ASR_RELAY ? t("asrHintRelay")
+                             : usable ? t("asrHintReady") : t("asrHintNeedKey");
 }
 $("geminiKey").addEventListener("input", syncAsrOption);
 $("asrEngine").addEventListener("change", syncAsrOption);
@@ -529,10 +535,14 @@ async function beginCapture({ resume = false } = {}) {
 
   engine = new LiveEngine({
     groqKey: groqKeys[0], groqKeys, proxy: useProxy, deviceId: micId, llmChain, targets,
-    // Streaming ASR only when this browser actually holds a Gemini key; the
-    // engine falls back to Whisper on its own if the socket is ever rejected,
-    // so a bad key degrades the transcript rather than ending the service.
-    asr: $("asrEngine").value === "gemini" && $("geminiKey").value.trim() ? "gemini" : "whisper",
+    // Streaming ASR when there is a way to reach Gemini at all — either the
+    // relay (key server-side, nothing typed here) or this browser's own key.
+    // The engine falls back to Whisper on its own if the socket is ever
+    // rejected, so a bad key or a dead relay degrades the transcript rather
+    // than ending the service.
+    asr: $("asrEngine").value === "gemini" && (ASR_RELAY || $("geminiKey").value.trim())
+      ? "gemini" : "whisper",
+    asrRelay: ASR_RELAY,
     geminiKey: $("geminiKey").value.trim(),
     language: $("lang").value,
     glossary: $("glossary").value.trim(),

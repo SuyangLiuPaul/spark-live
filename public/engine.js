@@ -805,10 +805,11 @@ export class LiveEngine {
       // (當日→當然), avoided a garbled run, and ADDS PUNCTUATION (which the
       // sentence splitter below depends on) for ~0.1 s more on a 25 s window.
       groqKey: "", groqKeys: [], proxy: false, deviceId: "", groqModel: "whisper-large-v3", language: "auto",
-      // "whisper" (windowed Groq, works hosted) | "gemini" (streaming, needs
-      // geminiKey in this browser). Anything unusable silently stays on
-      // whisper — a missing key must never take the service off the air.
-      asr: "whisper", geminiKey: "",
+      // "whisper" (windowed Groq, works hosted) | "gemini" (streaming). Gemini
+      // needs EITHER asrRelay (the Worker holds the key, so the page needs
+      // nothing) OR geminiKey in this browser. Anything unusable silently
+      // stays on whisper — a missing key must never take the service off air.
+      asr: "whisper", geminiKey: "", asrRelay: "",
       llmChain: [],            // ordered [{id, key, model?, base?}]; groq steps get the pool
       targets: ["prs"],        // audience languages, first = primary
       interim: true,           // cheap provisional translation of the live tail
@@ -849,7 +850,8 @@ export class LiveEngine {
     }
     // Streaming ASR replaces the Groq audio pool, not the chat chain: the LLM
     // still corrects and translates every settled sentence.
-    this.useGemini = this.cfg.asr === "gemini" && !!this.cfg.geminiKey;
+    this.useGemini = this.cfg.asr === "gemini"
+      && (!!this.cfg.asrRelay || !!this.cfg.geminiKey);
     if (!this.useGemini && !this.cfg.proxy && !this.pool.size) throw new Error("missing_asr_key");
     if (!this.cfg.llmChain || !this.cfg.llmChain.length) throw new Error("missing_llm_key");
 
@@ -884,6 +886,7 @@ export class LiveEngine {
    */
   _startGemini() {
     this.gasr = new GeminiLiveAsr({
+      relay: this.cfg.asrRelay,
       key: this.cfg.geminiKey,
       language: this.cfg.language === "auto" ? "" : this.cfg.language,
       // The glossary becomes ASR BIAS rather than post-hoc correction. The text
