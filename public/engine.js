@@ -378,15 +378,30 @@ class Capture {
     return true;
   }
 
-  /** Is the microphone gone, whatever the audio graph is still handing us? */
-  inputDead() {
-    if (this.inputMuted || this.inputEnded) return true;
-    // The events are the fast path; readyState is the truth, and cheap.
+  /**
+   * The track, if we still have one. `onended` is not reliable on its own —
+   * it does not fire for a track ended locally, and was already false 300 ms
+   * after a real one ended in Chrome — so readyState is the thing to trust and
+   * the events are only the fast path.
+   */
+  _track() {
     try {
-      const t0 = this.stream && this.stream.getAudioTracks && this.stream.getAudioTracks()[0];
-      if (t0 && (t0.readyState !== "live" || t0.muted)) return true;
-    } catch {}
-    return false;
+      return (this.stream && this.stream.getAudioTracks && this.stream.getAudioTracks()[0]) || null;
+    } catch { return null; }
+  }
+
+  /** The device is GONE. Unambiguous, and true whether or not anyone is looking. */
+  inputGone() {
+    if (this.inputEnded) return true;
+    const t0 = this._track();
+    return !!t0 && t0.readyState !== "live";
+  }
+
+  /** Gone, or held by something else. Either way nothing of the room reaches us. */
+  inputDead() {
+    if (this.inputMuted) return true;
+    const t0 = this._track();
+    return this.inputGone() || !!(t0 && t0.muted);
   }
 
   /**
@@ -1208,7 +1223,14 @@ export class LiveEngine {
     // past by the time the presenter comes back, and the first visible tick
     // then reads a minute of "silence" that was only ever the screen being off.
     // start() stamps the clock on the way back to the foreground for that.
-    if (document.visibilityState !== "visible") { this.lastAudioAt = Date.now(); return; }
+    // A track that has ENDED is gone whether or not anyone is looking at the
+    // screen, and the sooner we start asking for it back the better — waiting
+    // for the presenter to wake their phone wastes the whole outage. Being
+    // MUTED is not treated the same way, because a backgrounded page is
+    // exactly where a platform might mute an input for its own reasons, and
+    // mailing us every time a screen sleeps is the bug we started from.
+    const gone = !!(this.cap && this.cap.inputGone());
+    if (document.visibilityState !== "visible" && !gone) { this.lastAudioAt = Date.now(); return; }
     const gap = Date.now() - this.lastAudioAt;
     // A dead input keeps the clock fresh all by itself (see _watchTrack), so
     // waiting for the clock to go stale would mean waiting forever.
