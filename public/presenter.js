@@ -252,7 +252,12 @@ async function adoptLiveSession() {
 
   doc.title = String(stored.title || doc.title);
   doc.langs = Array.isArray(stored.langs) ? stored.langs : doc.langs;
-  doc.lines = Array.isArray(stored.lines) ? stored.lines : [];
+  doc.lines = (Array.isArray(stored.lines) ? stored.lines : [])
+    // A line still pending here was waiting on the OLD tab's translation
+    // queue, which is gone; it would stay pending forever, and the audience
+    // view hides untranslated pending lines. Settle it as failed so the source
+    // text is at least on screen.
+    .map((l) => (l && l.pending ? { ...l, pending: false, failed: true } : l));
   doc.startedAt = Number(stored.startedAt) || Date.now();
   doc.live = true;
   doc.ended = false;
@@ -609,7 +614,15 @@ async function beginCapture({ resume = false } = {}) {
   });
 
   try {
-    await engine.start();
+    // After a mid-service reload the room's lines come back with their ids
+  // (adoptLiveSession), but a fresh engine numbers from 1 again — and the line
+  // handler merges BY ID. So the first sentences after a resume silently
+  // replaced the oldest lines on every phone instead of appending: say the
+  // same two phrases again and the audience sees them twice while the real
+  // opening lines vanish. Reproduced exactly from a member's screenshot.
+  // Continue from the highest id the room already has.
+  engine.seq = doc.lines.reduce((m, l) => Math.max(m, Number(l.id) || 0), 0);
+  await engine.start();
   } catch (e) {
     const why = e.message === "missing_asr_key" ? t("noGroq") : micErrorMessage(e, t);
     // On resume the setup panel is hidden, so its message would be invisible —

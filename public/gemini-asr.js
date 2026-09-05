@@ -237,7 +237,7 @@ export class GeminiLiveAsr {
       if (this.closed) return;
       // 1000 here is the server ending a session that has run its course, which
       // for a sermon means "carry on", not "stop".
-      this._retry(new Error(`asr_socket_closed_${e.code}`), e.code);
+      this._retry(new Error(`asr_socket_closed_${e.code}`), e.code, e.reason);
     };
   }
 
@@ -249,12 +249,22 @@ export class GeminiLiveAsr {
     if (!this.closed) setTimeout(() => this._open(), 50);
   }
 
-  _retry(err, code) {
+  _retry(err, code, reason) {
     this.reconnects++;
     this.fails++;
     // A key problem will not fix itself by reconnecting, and retrying forever
-    // would hide it behind a silent stream of failures.
-    if (code === 1007 || code === 1008) {
+    // would hide it behind a silent stream of failures. But 1007 is not only
+    // "bad key": measured from the church site itself, 1 socket in 10 through
+    // the relay closed 1007 "User location is not supported for the API use"
+    // — Google judging the Worker's egress colo, not the key — and the next
+    // attempt from the same page succeeded. Giving up on that would have
+    // dropped a healthy Sunday to Whisper on the first try. So only a reason
+    // that actually talks about the key ends the loop here; anything else on
+    // 1007/1008 retries and is bounded by MAX_CONSECUTIVE_FAILS like the rest.
+    const why = String(reason || "");
+    const keyProblem = (code === 1007 || code === 1008)
+      && (/api key|unregistered|unauthenticated|permission/i.test(why) || !why);
+    if (keyProblem) {
       this.o.onError && this.o.onError(new Error("asr_auth_rejected"));
       this.closed = true;
       return;
