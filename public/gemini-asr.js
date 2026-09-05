@@ -199,11 +199,16 @@ export class GeminiLiveAsr {
       }
       let m;
       try { m = JSON.parse(raw); } catch { return; }
+      // Any parsed server message counts as a sign of life. The engine reads
+      // this to notice a session that is still open but has gone quiet while
+      // the room is clearly talking — see LiveEngine._maybeTick.
+      this.lastServerMsgAt = Date.now();
 
       if (m.setupComplete) {
         this.connected = true;
         this.backoff = RECONNECT_MS;
         this.fails = 0;
+        this.lastServerMsgAt = Date.now();
         this.o.onStatus && this.o.onStatus({ connected: true, resumed: !!this.handle });
         this._drainGap();
         return;
@@ -241,8 +246,9 @@ export class GeminiLiveAsr {
     };
   }
 
-  /** Deliberate reconnect (GoAway) — no backoff, we were told in advance. */
+  /** Deliberate reconnect (GoAway, or a session gone quiet) — no backoff. */
   _cycle() {
+    this.cycles = (this.cycles || 0) + 1;
     try { this.ws && this.ws.close(); } catch {}
     this.ws = null;
     this.connected = false;

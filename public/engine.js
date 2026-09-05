@@ -78,6 +78,10 @@ const EXHAUSTED_BACKOFF_MS = 60000;
 const SILENCE_FLUSH_MS = 700; // a pause this long ends a unit
 const MAX_SENTENCE_CHARS = 150;
 const MAX_UNIT_WAIT_MS = 6000;// never sit on committed text longer than this
+// Streaming ASR: how long the server may stay silent WHILE SPEECH IS ARRIVING
+// before the socket is cycled. Interims normally come several times a second
+// during speech, so 20 s of nothing is a dead session, not a pause.
+const GEMINI_STALL_MS = 20000;
 const MIN_CLAUSE_CHARS = 26;  // a comma only ends a unit once it's worth sending
 
 // Interim ("live tail") translation: cheap, fast, provisional. Only ONE line is
@@ -983,6 +987,21 @@ export class LiveEngine {
         const quiet = Date.now() - this.lastVoiceAt > SILENCE_FLUSH_MS;
         const stale = this.pendingSince && Date.now() - this.pendingSince > MAX_UNIT_WAIT_MS;
         if ((quiet && !this._gInterim) || stale) this._flushSentence();
+      }
+      // A session can stay OPEN and simply stop answering: measured at 1x on
+      // 2026-09-05, the server went silent for 107 s while speech kept
+      // arriving, and only then closed the socket — and the client reconnects
+      // only on close. Nothing reached the audience for that whole stretch.
+      // So: voice is present (the level meter says so) and the server has said
+      // nothing for GEMINI_STALL_MS → cycle the socket now. During real
+      // silence in the room this never fires, because lastVoiceAt is old too.
+      const g = this.gasr;
+      if (g && g.connected && g.lastServerMsgAt
+          && Date.now() - this.lastVoiceAt < 3000
+          && Date.now() - g.lastServerMsgAt > GEMINI_STALL_MS) {
+        g.lastServerMsgAt = Date.now();      // one cycle per stall, not one per tick
+        this.on.status({ running: true, asr: "gemini", stalled: true });
+        g._cycle();
       }
       return;
     }
