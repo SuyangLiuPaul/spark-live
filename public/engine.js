@@ -219,6 +219,7 @@ class Capture {
     if (this.deviceId) audio.deviceId = { ideal: this.deviceId };
     this._audioConstraints = audio;
     this.stream = await navigator.mediaDevices.getUserMedia({ audio });
+    this._watchTrack();
     this.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     if (this.ctx.state === "suspended") await this.ctx.resume();
     this.src = this.ctx.createMediaStreamSource(this.stream);
@@ -266,6 +267,24 @@ class Capture {
   }
 
   /**
+   * A track the OS has MUTED is the quietest way to lose a service, and the
+   * likeliest one on a phone: an incoming call takes audio focus, and the
+   * browser keeps delivering perfectly regular buffers of digital silence
+   * rather than ending the track. Every "is audio arriving?" check passes, so
+   * measured for 5 minutes this produced no warning, no transcript and no
+   * error — the session simply stopped meaning anything. Watching the flag is
+   * the only honest signal; the samples themselves look like a quiet room.
+   */
+  _watchTrack() {
+    const track = this.stream && this.stream.getAudioTracks
+      ? this.stream.getAudioTracks()[0] : null;
+    if (!track) return;
+    this.inputMuted = !!track.muted;
+    track.onmute = () => { this.inputMuted = true; };
+    track.onunmute = () => { this.inputMuted = false; };
+  }
+
+  /**
    * Try to get the room back after audio stopped arriving.
    *
    * Two different faults look identical from outside — no chunks — and they
@@ -310,13 +329,16 @@ class Capture {
     this.stream = fresh;
     this.src = this.ctx.createMediaStreamSource(this.stream);
     this.src.connect(this.node);          // the worklet and its sink are untouched
-    // The archive recorder was bound to the stream that just died. Start it on
-    // the new one so the rest of the service is still recorded; the slices are
-    // appended to the same file, which players read as one continuous recording
-    // even though it is two encodes.
-    try { this.rec && this.rec.state !== "inactive" && this.rec.stop(); } catch {}
-    this.rec = null;
-    this._startRecorder();
+    this._watchTrack();
+    // The archive recorder stays on the stream that died, and is deliberately
+    // NOT restarted on the new one. Appending a second encode to the same
+    // chunk list looks like it should work and does not: measured with ffmpeg,
+    // a joined 5 s + 7 s WebM reads as 5 s, so the remainder would be dead
+    // bytes inside a file that claims to hold the whole service. A recording
+    // that honestly stops at the drop is worth more than one that lies about
+    // its length. (To keep all of it, the recorder would have to hang off a
+    // MediaStreamDestination in the graph rather than off the microphone.)
+    this.recSplitAt = this.recSplitAt || Date.now();
     return true;
   }
 
@@ -1025,11 +1047,20 @@ export class LiveEngine {
 
   _audio(chunk, rate) {
     if (!this.running) return;
-    this.lastAudioAt = Date.now();
-    if (this.stallWarned) {                 // recovered (e.g. mic reconnected)
-      this.stallWarned = false;
-      this.stallReported = false;
-      this.on.status({ running: true, stalled: false });
+    // Buffers still arrive while the OS holds the microphone for something
+    // else; they are just silence. Counting them as proof the input is alive
+    // is what let a muted mic run a whole service without one warning.
+    if (this.cap && this.cap.inputMuted) {
+      // Silence from a muted input clears nothing: treating it as recovery
+      // would flicker the warning off and on every few seconds and re-send the
+      // alert each time round.
+    } else {
+      this.lastAudioAt = Date.now();
+      if (this.stallWarned) {               // recovered (e.g. mic reconnected)
+        this.stallWarned = false;
+        this.stallReported = false;
+        this.on.status({ running: true, stalled: false });
+      }
     }
     const pcm = resampleTo16k(chunk, rate);
     // Streaming ASR consumes audio as it arrives, so the overlapping-window
@@ -1383,7 +1414,15 @@ Reply with JSON only: {"t":"..."}`;
   archiveFile() {
     const recorded = this.cap && this.cap.archive();
     if (recorded) {
-      return { blob: recorded, ext: recorded.type.includes("mp4") ? "m4a" : "webm", truncated: false };
+      return {
+        blob: recorded,
+        ext: recorded.type.includes("mp4") ? "m4a" : "webm",
+        truncated: false,
+        // The recorder was bound to a microphone that went away mid-service, so
+        // this file ends there even though the transcript carried on. Say so
+        // rather than letting a short file look like a lost sermon.
+        stoppedEarly: !!(this.cap && this.cap.recSplitAt),
+      };
     }
     if (!this.archive.length) return null;
     const all = new Float32Array(this.archiveLen);

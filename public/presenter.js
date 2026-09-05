@@ -755,6 +755,7 @@ $("dlBtn").onclick = async () => {
     // Only reachable on a browser with no MediaRecorder, where the archive is
     // capped — say so rather than letting them discover it at the Mac.
     if (file.truncated) toast(t("recordingTruncated"), "bad");
+    if (file.stoppedEarly) toast(t("recordingStopped"), "bad");
   } finally {
     $("dlBtn").disabled = false;
   }

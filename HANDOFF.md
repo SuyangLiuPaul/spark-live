@@ -224,6 +224,21 @@ cannot debug them:
   We are emailed only if audio is *still* absent at 20 s, with the real state
   (`ctx=… track=…`) in the report, because the first version mailed us for
   every screen that slept and woke.
+- **A MUTED track is the quietest failure there is.** When something else takes
+  audio focus (a call arriving on the presenter's phone), the browser does not
+  end the track; it keeps delivering regular buffers of digital silence. Every
+  "is audio still arriving?" test passes, so measured over 5 minutes this
+  produced no warning, no transcript and no error at all. `track.muted` and the
+  `mute`/`unmute` events are the only honest signal, and silence that arrives
+  while muted is not allowed to clear a stall either, or the warning flickers
+  and re-sends the alert every few seconds.
+- **The archive is deliberately NOT restarted after a mic retake.** Appending a
+  second encode to the same chunk list looks right and is not: measured with
+  ffmpeg, a joined 5 s + 7 s WebM reads as 5 s, so the tail would be dead bytes
+  in a file claiming to hold the whole service. The recording honestly ends at
+  the drop and the presenter is told so; the transcript is unaffected. Keeping
+  all of it would mean hanging the recorder off a `MediaStreamDestination` in
+  the graph instead of off the microphone, at the graph's 16 kHz.
 - **A hidden page's clock is stamped on the way back, not by the tick.** The
   watchdog ignores stalls while hidden, but a throttled tab may not tick for a
   minute, so the first visible tick used to read that whole minute as silence
