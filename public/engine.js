@@ -267,21 +267,30 @@ class Capture {
   }
 
   /**
-   * A track the OS has MUTED is the quietest way to lose a service, and the
-   * likeliest one on a phone: an incoming call takes audio focus, and the
-   * browser keeps delivering perfectly regular buffers of digital silence
-   * rather than ending the track. Every "is audio arriving?" check passes, so
-   * measured for 5 minutes this produced no warning, no transcript and no
-   * error — the session simply stopped meaning anything. Watching the flag is
-   * the only honest signal; the samples themselves look like a quiet room.
+   * Watch the TRACK, because the audio graph will lie to you.
+   *
+   * Measured in Chrome on 2026-09-06: when a track ends, the
+   * MediaStreamAudioSourceNode feeding the worklet does NOT stop. It keeps
+   * being pulled at exactly the same rate and emits digital silence (12
+   * callbacks in the 2.5 s after `stop()`, RMS 0.0000). A muted track behaves
+   * the same way. So "no audio is arriving" — the question the stall watchdog
+   * was built to ask — can never become true for an input that goes away; it
+   * only becomes true when the AudioContext itself is suspended, which is
+   * mostly just the page being in the background.
+   *
+   * The track's own state is the honest signal, and it is the only one: the
+   * samples look exactly like a quiet room, and a quiet room is something a
+   * church service does regularly.
    */
   _watchTrack() {
     const track = this.stream && this.stream.getAudioTracks
       ? this.stream.getAudioTracks()[0] : null;
     if (!track) return;
     this.inputMuted = !!track.muted;
+    this.inputEnded = track.readyState !== "live";
     track.onmute = () => { this.inputMuted = true; };
     track.onunmute = () => { this.inputMuted = false; };
+    track.onended = () => { this.inputEnded = true; };
     // Remember which input we are actually on, not which one was asked for.
     // A presenter who never opened the picker still has a real device, and
     // that is the one a retake has to aim at.
@@ -367,6 +376,17 @@ class Capture {
     // MediaStreamDestination in the graph rather than off the microphone.)
     this.recSplitAt = this.recSplitAt || Date.now();
     return true;
+  }
+
+  /** Is the microphone gone, whatever the audio graph is still handing us? */
+  inputDead() {
+    if (this.inputMuted || this.inputEnded) return true;
+    // The events are the fast path; readyState is the truth, and cheap.
+    try {
+      const t0 = this.stream && this.stream.getAudioTracks && this.stream.getAudioTracks()[0];
+      if (t0 && (t0.readyState !== "live" || t0.muted)) return true;
+    } catch {}
+    return false;
   }
 
   /**
@@ -1077,10 +1097,10 @@ export class LiveEngine {
     // Buffers still arrive while the OS holds the microphone for something
     // else; they are just silence. Counting them as proof the input is alive
     // is what let a muted mic run a whole service without one warning.
-    if (this.cap && this.cap.inputMuted) {
-      // Silence from a muted input clears nothing: treating it as recovery
-      // would flicker the warning off and on every few seconds and re-send the
-      // alert each time round.
+    if (this.cap && this.cap.inputDead()) {
+      // Silence from a dead input proves nothing and clears nothing. Treating
+      // it as recovery would flicker the warning off and on every few seconds
+      // and re-send the alert each time round.
     } else {
       this.lastAudioAt = Date.now();
       if (this.stallWarned) {               // recovered (e.g. mic reconnected)
@@ -1190,7 +1210,9 @@ export class LiveEngine {
     // start() stamps the clock on the way back to the foreground for that.
     if (document.visibilityState !== "visible") { this.lastAudioAt = Date.now(); return; }
     const gap = Date.now() - this.lastAudioAt;
-    if (gap < MIC_WARN_MS) return;
+    // A dead input keeps the clock fresh all by itself (see _watchTrack), so
+    // waiting for the clock to go stale would mean waiting forever.
+    if (gap < MIC_WARN_MS && !(this.cap && this.cap.inputDead())) return;
 
     if (!this.stallWarned) {
       this.stallWarned = true;

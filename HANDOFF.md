@@ -224,6 +224,17 @@ cannot debug them:
   We are emailed only if audio is *still* absent at 20 s, with the real state
   (`ctx=… track=…`) in the report, because the first version mailed us for
   every screen that slept and woke.
+- **The audio graph lies about the microphone; ask the track.** Measured in
+  Chrome on 2026-09-06: after `track.stop()`, the `MediaStreamAudioSourceNode`
+  feeding the worklet does not stop. It is pulled at the same rate and emits
+  digital silence (12 callbacks in the following 2.5 s, RMS 0.0000). So "no
+  audio is arriving", the question this watchdog was originally built to ask,
+  can never become true for an input that goes away — it only becomes true when
+  the AudioContext itself is suspended, which is mostly just the page being in
+  the background. That is very probably what the one production `mic_stalled`
+  alert actually was. `readyState`/`muted` plus the `ended`/`mute` events are
+  the only honest signal, because the samples look exactly like a quiet room
+  and a quiet room is normal in a service.
 - **A MUTED track is the quietest failure there is.** When something else takes
   audio focus (a call arriving on the presenter's phone), the browser does not
   end the track; it keeps delivering regular buffers of digital silence. Every
