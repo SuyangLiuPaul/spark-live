@@ -232,6 +232,14 @@ cannot debug them:
   `mute`/`unmute` events are the only honest signal, and silence that arrives
   while muted is not allowed to clear a stall either, or the warning flickers
   and re-sends the alert every few seconds.
+- **A retake is pinned to the input we were actually on** (`track.getSettings()`
+  at start, not the id that was asked for). With `ideal`, a dropped Bluetooth
+  mic would be replaced by the built-in one, audio would flow, the stall
+  warning would clear, and the presenter would be told all was well while the
+  room was transcribed off the wrong microphone. A mic can come back under a
+  new id, though, so refusing everything else would mean never recovering:
+  `exact` first, any input second, and `mic_changed` said out loud when it is
+  the second.
 - **The archive is deliberately NOT restarted after a mic retake.** Appending a
   second encode to the same chunk list looks right and is not: measured with
   ffmpeg, a joined 5 s + 7 s WebM reads as 5 s, so the tail would be dead bytes

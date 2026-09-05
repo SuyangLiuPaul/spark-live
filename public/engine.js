@@ -282,6 +282,10 @@ class Capture {
     this.inputMuted = !!track.muted;
     track.onmute = () => { this.inputMuted = true; };
     track.onunmute = () => { this.inputMuted = false; };
+    // Remember which input we are actually on, not which one was asked for.
+    // A presenter who never opened the picker still has a real device, and
+    // that is the one a retake has to aim at.
+    try { this._activeDeviceId = track.getSettings?.().deviceId || this._activeDeviceId; } catch {}
   }
 
   /**
@@ -319,11 +323,34 @@ class Capture {
     }
   }
 
-  /** Ask for the microphone again and splice it into the existing graph. */
+  /**
+   * Ask for the microphone again and splice it into the existing graph.
+   *
+   * Pinned to the input we were actually on. `ideal` would let a dropped
+   * Bluetooth mic be replaced by the laptop's built-in one, audio would start
+   * flowing, the stall warning would clear, and the presenter would be told
+   * everything was fine while the room was being transcribed off the wrong
+   * microphone. So: the same device, or a substitute we say out loud.
+   */
   async _retakeMic() {
-    const fresh = await navigator.mediaDevices.getUserMedia({
-      audio: this._audioConstraints || { channelCount: 1 },
-    });
+    let fresh = null;
+    const want = this._activeDeviceId;
+    if (want) {
+      try {
+        fresh = await navigator.mediaDevices.getUserMedia({
+          audio: { ...(this._audioConstraints || {}), deviceId: { exact: want } },
+        });
+      } catch { /* the same device is not back yet — see below */ }
+    }
+    if (!fresh) {
+      // A Bluetooth mic can come back under a new id, so refusing anything but
+      // the old one would mean never recovering. Take what there is, and let
+      // the presenter know the input is not the one they set up.
+      fresh = await navigator.mediaDevices.getUserMedia({
+        audio: this._audioConstraints || { channelCount: 1 },
+      });
+      if (want) this.inputChanged = true;
+    }
     try { this.src && this.src.disconnect(); } catch {}
     try { this.stream && this.stream.getTracks().forEach((t) => t.stop()); } catch {}
     this.stream = fresh;
@@ -1176,7 +1203,16 @@ export class LiveEngine {
     // if someone in the room notices and presses Stop/Start.
     if (this.cap && Date.now() - (this.lastRecoverAt || 0) >= MIC_RETRY_MS) {
       this.lastRecoverAt = Date.now();
-      this.cap.recover().catch(() => {});
+      this.cap.recover()
+        .then(() => {
+          // Recovered onto a different input than the one that was set up. The
+          // service continues, but nobody should believe it is the same mic.
+          if (this.cap && this.cap.inputChanged && !this.inputChangeTold) {
+            this.inputChangeTold = true;
+            this.on.error(new Error("mic_changed"));
+          }
+        })
+        .catch(() => {});
     }
     // Still nothing well after the warning: this one is real, so tell us.
     if (gap >= MIC_REPORT_MS && !this.stallReported) {

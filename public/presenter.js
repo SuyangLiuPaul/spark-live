@@ -590,6 +590,11 @@ async function beginCapture({ resume = false } = {}) {
         showErr(t("micStalled")); toast(t("micStalled"), "bad");
         return;
       }
+      if (msg === "mic_changed") {
+        showErr(t("micChanged")); toast(t("micChanged"), "bad");
+        reporter.report("mic_stalled", t("micChanged"), "recovered onto a different input device");
+        return;
+      }
       if (msg === "audio_stalled_persists") {
         reporter.report("mic_stalled", t("micStalled"),
           e.detail || "no audio from the input for 20s");
