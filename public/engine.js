@@ -82,6 +82,19 @@ const MAX_UNIT_WAIT_MS = 6000;// never sit on committed text longer than this
 // before the socket is cycled. Interims normally come several times a second
 // during speech, so 20 s of nothing is a dead session, not a pause.
 const GEMINI_STALL_MS = 20000;
+
+/**
+ * Two thresholds, because the two audiences are different. The presenter wants
+ * to know the moment the room stops being captured, so 5 s of nothing puts a
+ * warning on their screen. We only want an email if it did NOT come back —
+ * a phone whose screen slept and woke, or a context the OS suspended for a
+ * second, heals itself and is not worth waking anyone up for.
+ */
+const MIC_WARN_MS = 5000;
+const MIC_REPORT_MS = 20000;
+// One attempt is not enough: a phone call owns the microphone for as long as it
+// lasts, and the input only becomes takeable again when it ends. So keep asking.
+const MIC_RETRY_MS = 10000;
 const MIN_CLAUSE_CHARS = 26;  // a comma only ends a unit once it's worth sending
 
 // Interim ("live tail") translation: cheap, fast, provisional. Only ONE line is
@@ -204,6 +217,7 @@ class Capture {
     // device is gone (unplugged between services), so prefer it and let the
     // browser fall back rather than refusing to start.
     if (this.deviceId) audio.deviceId = { ideal: this.deviceId };
+    this._audioConstraints = audio;
     this.stream = await navigator.mediaDevices.getUserMedia({ audio });
     this.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     if (this.ctx.state === "suspended") await this.ctx.resume();
@@ -245,10 +259,80 @@ class Capture {
 
   /** The recorded session, or null when this browser had no MediaRecorder. */
   archive() {
-    if (!this.rec || !this.recChunks.length) return null;
+    if (!this.recChunks.length || !this.recType) return null;
     // Strip the codec parameter: a Blob type of "audio/webm;codecs=opus" makes
     // some upload endpoints reject the file on a MIME allow-list.
     return new Blob(this.recChunks, { type: this.recType.split(";")[0] });
+  }
+
+  /**
+   * Try to get the room back after audio stopped arriving.
+   *
+   * Two different faults look identical from outside — no chunks — and they
+   * need opposite responses. A SUSPENDED context still owns a live microphone
+   * and only needs resuming; an ENDED track is gone for good (a phone call took
+   * the mic, a Bluetooth headset switched profile, the OS handed the input to
+   * another app) and no amount of resuming will bring it back, only asking for
+   * it again will. Before this, the only recovery was a human noticing the
+   * warning and restarting the session — mid-sermon, from the lectern.
+   *
+   * Returns true when the input is plausibly alive again. A CLOSED context is
+   * not recoverable here: a fresh AudioContext needs a user gesture, which is
+   * what the Resume button is for.
+   */
+  async recover() {
+    if (this._recovering || !this.ctx) return false;
+    this._recovering = true;
+    try {
+      if (this.ctx.state === "closed") return false;
+      if (this.ctx.state === "suspended") { try { await this.ctx.resume(); } catch {} }
+      const track = this.stream && this.stream.getAudioTracks
+        ? this.stream.getAudioTracks()[0] : null;
+      // A running context with a live track will start pulling the worklet by
+      // itself; taking the microphone again in that state would interrupt a
+      // service that was already fixing itself.
+      if (this.ctx.state === "running" && track && track.readyState === "live") return true;
+      return await this._retakeMic();
+    } catch {
+      return false;
+    } finally {
+      this._recovering = false;
+    }
+  }
+
+  /** Ask for the microphone again and splice it into the existing graph. */
+  async _retakeMic() {
+    const fresh = await navigator.mediaDevices.getUserMedia({
+      audio: this._audioConstraints || { channelCount: 1 },
+    });
+    try { this.src && this.src.disconnect(); } catch {}
+    try { this.stream && this.stream.getTracks().forEach((t) => t.stop()); } catch {}
+    this.stream = fresh;
+    this.src = this.ctx.createMediaStreamSource(this.stream);
+    this.src.connect(this.node);          // the worklet and its sink are untouched
+    // The archive recorder was bound to the stream that just died. Start it on
+    // the new one so the rest of the service is still recorded; the slices are
+    // appended to the same file, which players read as one continuous recording
+    // even though it is two encodes.
+    try { this.rec && this.rec.state !== "inactive" && this.rec.stop(); } catch {}
+    this.rec = null;
+    this._startRecorder();
+    return true;
+  }
+
+  /**
+   * Where the input actually is, in one line, for the alert we send ourselves.
+   * "no audio" alone cannot be acted on; "the track ended" means the OS handed
+   * the microphone to something else, and "suspended" means the browser paused
+   * us — different conversations with the person who was presenting.
+   */
+  state() {
+    let track = "none";
+    try {
+      const t0 = this.stream && this.stream.getAudioTracks && this.stream.getAudioTracks()[0];
+      if (t0) track = `${t0.readyState}${t0.muted ? "/muted" : ""}`;
+    } catch {}
+    return `ctx=${this.ctx ? this.ctx.state : "none"} track=${track}`;
   }
 
   stop() {
@@ -872,6 +956,13 @@ export class LiveEngine {
     // unset it reads as "last transcribed at epoch 0" and fires on tick one.
     this.lastAsrAt = Date.now();
     this.stallWarned = false;
+    this.stallReported = false;
+    // See _watchdog: the tick that would have cleared the clock may never have
+    // run while the page was hidden, so do it on the transition itself.
+    this._vis = () => {
+      if (document.visibilityState === "visible") this.lastAudioAt = Date.now();
+    };
+    document.addEventListener("visibilitychange", this._vis);
     // Background tabs throttle setInterval to about once a MINUTE, which would
     // silently stall a live session the moment the presenter checks a message.
     // The AudioWorklet keeps delivering while hidden, so audio is the reliable
@@ -926,6 +1017,7 @@ export class LiveEngine {
   stop() {
     this.running = false;
     clearInterval(this.timer);
+    if (this._vis) { document.removeEventListener("visibilitychange", this._vis); this._vis = null; }
     this.gasr && this.gasr.stop();
     this.cap && this.cap.stop();
     this.on.status({ running: false });
@@ -936,6 +1028,7 @@ export class LiveEngine {
     this.lastAudioAt = Date.now();
     if (this.stallWarned) {                 // recovered (e.g. mic reconnected)
       this.stallWarned = false;
+      this.stallReported = false;
       this.on.status({ running: true, stalled: false });
     }
     const pcm = resampleTo16k(chunk, rate);
@@ -1027,15 +1120,42 @@ export class LiveEngine {
    * "Live" while nothing is being captured.
    */
   _watchdog() {
-    if (!this.running || this.stallWarned) return;
+    if (!this.running) return;
     // A hidden page has its audio suspended by the OS on purpose — that's not a
     // broken microphone, and warning about it would cry wolf every time the
     // presenter glances at another app. Only judge a stall while visible.
+    //
+    // Clearing the clock here is not enough on its own: a hidden tab's timers
+    // are throttled to about once a MINUTE, so the last hidden tick can be long
+    // past by the time the presenter comes back, and the first visible tick
+    // then reads a minute of "silence" that was only ever the screen being off.
+    // start() stamps the clock on the way back to the foreground for that.
     if (document.visibilityState !== "visible") { this.lastAudioAt = Date.now(); return; }
-    if (Date.now() - this.lastAudioAt < 5000) return;
-    this.stallWarned = true;
-    this.on.status({ running: true, stalled: true });
-    this.on.error(new Error("audio_stalled"));
+    const gap = Date.now() - this.lastAudioAt;
+    if (gap < MIC_WARN_MS) return;
+
+    if (!this.stallWarned) {
+      this.stallWarned = true;
+      this.on.status({ running: true, stalled: true });
+      this.on.error(new Error("audio_stalled"));
+      this.lastRecoverAt = 0;
+    }
+    // Complaining is not a fix. A suspended context can be resumed and an ended
+    // track can be retaken, and either beats a dead session that only recovers
+    // if someone in the room notices and presses Stop/Start.
+    if (this.cap && Date.now() - (this.lastRecoverAt || 0) >= MIC_RETRY_MS) {
+      this.lastRecoverAt = Date.now();
+      this.cap.recover().catch(() => {});
+    }
+    // Still nothing well after the warning: this one is real, so tell us.
+    if (gap >= MIC_REPORT_MS && !this.stallReported) {
+      this.stallReported = true;
+      const err = new Error("audio_stalled_persists");
+      err.detail = `no audio for ${Math.round(gap / 1000)}s after ${
+        Math.max(1, Math.round(gap / MIC_RETRY_MS))} recovery attempts; ${
+        this.cap ? this.cap.state() : "no capture"}`;
+      this.on.error(err);
+    }
   }
 
   /**

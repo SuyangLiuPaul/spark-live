@@ -582,9 +582,17 @@ async function beginCapture({ resume = false } = {}) {
     interim: (t) => { doc.interim = t || ""; renderDraft(); schedulePush(); },
     error: (e) => {
       const msg = String(e && e.message ? e.message : e);
+      // Two stages. The presenter is told at once, because they are the only
+      // one who can look at the cable; we are told only if the engine's own
+      // recovery failed to bring the room back, because a screen that slept
+      // and woke is not an incident.
       if (msg === "audio_stalled") {
         showErr(t("micStalled")); toast(t("micStalled"), "bad");
-        reporter.report("mic_stalled", t("micStalled"), "no audio from the input for 5s");
+        return;
+      }
+      if (msg === "audio_stalled_persists") {
+        reporter.report("mic_stalled", t("micStalled"),
+          e.detail || "no audio from the input for 20s");
         return;
       }
       if (e && e.exhausted) {
@@ -600,6 +608,9 @@ async function beginCapture({ resume = false } = {}) {
     },
     status: (s) => {
       $("dot").classList.toggle("bad", !!s.stalled);
+      // The microphone came back — clear the warning, or the console keeps
+      // accusing an input that is working again.
+      if (s.stalled === false) { showErr(""); toast(t("micBack"), "ok"); }
       // The pool refills on its own; clear the quota warning when it does,
       // otherwise the console keeps accusing a budget that has come back.
       if (s.exhausted === false) { showErr(""); toast(t("quotaBack"), "ok"); }

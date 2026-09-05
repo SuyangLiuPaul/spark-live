@@ -217,7 +217,18 @@ cannot debug them:
   moment the presenter checks a message. The AudioWorklet keeps delivering
   while hidden, so audio is the reliable clock.
 - **Audio stall watchdog** — a Bluetooth mic dropping used to leave the UI
-  saying "Live" while nothing was captured. 5 s without audio raises it.
+  saying "Live" while nothing was captured. 5 s without audio warns the
+  presenter, and the engine then tries to fix it: a suspended `AudioContext` is
+  resumed, and a track the OS ended is asked for again, retried every 10 s for
+  as long as the outage lasts (a phone call holds the microphone until it ends).
+  We are emailed only if audio is *still* absent at 20 s, with the real state
+  (`ctx=… track=…`) in the report, because the first version mailed us for
+  every screen that slept and woke.
+- **A hidden page's clock is stamped on the way back, not by the tick.** The
+  watchdog ignores stalls while hidden, but a throttled tab may not tick for a
+  minute, so the first visible tick used to read that whole minute as silence
+  and mail us the moment the presenter woke their phone. `start()` listens for
+  `visibilitychange` and stamps `lastAudioAt` on the transition itself.
 - **Connection state** reports real request outcomes, not just
   `navigator.onLine`, and only trips after 3 consecutive failures.
 - **Actionable errors** — `NotAllowedError` etc. become sentences telling the
