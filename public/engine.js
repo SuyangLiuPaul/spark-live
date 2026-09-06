@@ -1425,12 +1425,43 @@ Reply with JSON only: {"t":"..."}`;
 
     // Prefer a real sentence boundary; fall back to length so an unpunctuated
     // speaker still gets delivered in readable pieces.
-    const m = this.sentence.match(/^([\s\S]*?[.!?。！？…]+["'”’)\]]?)\s*([\s\S]*)$/);
-    if (m) { const done = m[1].trim(); this.sentence = m[2] || ""; if (done) this._send(done); return; }
+    if (this._drainSentences()) return;
     if (this.sentence.length >= MAX_SENTENCE_CHARS) this._flushSentence();
   }
 
+  /**
+   * Take out EVERY finished sentence, not just the first one.
+   *
+   * Streaming ASR hands over whole utterances, so one final routinely carries
+   * several sentences. Peeling off only the leading one left the rest sitting
+   * in the buffer until the speaker paused, and the pause flush then put all
+   * of them on the room's screen as a single 358-character paragraph, which is
+   * exactly what a congregation reading a second language cannot keep up with:
+   * it arrives all at once and is pushed off by the next one. One sentence per
+   * line also means each is translated on its own and appears as its
+   * translation lands, so the screen advances at the pace of the speech.
+   *
+   * Returns true when at least one line was sent.
+   */
+  _drainSentences() {
+    let sent = false;
+    for (;;) {
+      const m = this.sentence.match(/^([\s\S]*?[.!?。！？…]+["'”’)\]]?)\s*([\s\S]*)$/);
+      if (!m) break;
+      const done = m[1].trim();
+      this.sentence = m[2] || "";
+      // The tail that is left is a new, unfinished unit: time it from now, or
+      // MAX_UNIT_WAIT_MS would measure from a sentence that has already gone.
+      this.pendingSince = this.sentence ? Date.now() : 0;
+      if (done) { this._send(done); sent = true; }
+    }
+    return sent;
+  }
+
   _flushSentence() {
+    // A flush is not a reason to glue finished sentences together: drain them
+    // first, then send whatever unfinished tail is left as its own line.
+    this._drainSentences();
     const s = this.sentence.trim();
     this.sentence = ""; this.pendingSince = 0;
     if (s) this._send(s);

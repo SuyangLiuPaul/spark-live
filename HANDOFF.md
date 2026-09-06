@@ -216,6 +216,18 @@ cannot debug them:
   throttle timers to ~1/min, which would silently stall a live session the
   moment the presenter checks a message. The AudioWorklet keeps delivering
   while hidden, so audio is the reliable clock.
+- **One sentence per line, always.** Streaming ASR hands over whole utterances,
+  so a single final routinely carries several sentences. Peeling off only the
+  leading one left the rest in the buffer until the speaker paused, and the
+  pause flush then put all of them on the room's screen as one 358-character
+  paragraph (seen in a service, 2026-09-06). `_drainSentences()` takes out every
+  finished sentence, so the output no longer depends on how the ASR happened to
+  chunk the audio, and each sentence is translated and appears on its own.
+- **The audience view is also a room monitor.** `.feed`'s bottom padding is the
+  gap under the newest line; at 40vh it cost half the display. Measured at
+  1366x768: 48% of the screen blank, 3 lines readable. Now 20vh, and 8vh on a
+  wide landscape screen: 16% blank, 5 lines. A line staying readable longer is
+  the same fix as showing more of them.
 - **Audio stall watchdog** — a Bluetooth mic dropping used to leave the UI
   saying "Live" while nothing was captured. 5 s without audio warns the
   presenter, and the engine then tries to fix it: a suspended `AudioContext` is

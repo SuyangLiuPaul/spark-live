@@ -766,6 +766,52 @@ $("dlBtn").onclick = async () => {
   }
 };
 
+/**
+ * The transcript as a file, for the review that happens after the service.
+ *
+ * Everything the room saw, in the order it was said: the corrected source and
+ * every translation of it, side by side under a timestamp, so a mistake spotted
+ * on Sunday can be found in the audio on Monday and turned into a glossary
+ * entry. Plain text on purpose — it has to open on any machine in the church
+ * and be editable by whoever is doing the correcting.
+ */
+function transcriptText() {
+  const langs = Array.isArray(doc.langs) ? doc.langs : [];
+  const started = Number(doc.startedAt) || Date.now();
+  const stamp = (ms) => {
+    const s = Math.max(0, Math.round((ms - started) / 1000));
+    const p2 = (n) => String(n).padStart(2, "0");
+    return `${p2(Math.floor(s / 3600))}:${p2(Math.floor(s / 60) % 60)}:${p2(s % 60)}`;
+  };
+  const head = [
+    doc.title || "Spark Live",
+    `${new Date(started).toLocaleString()} · ${doc.lines.length} lines`,
+    `Source → ${langs.map((l) => l.label || l.c).join(", ") || "(no translation)"}`,
+    "",
+  ];
+  const body = doc.lines.map((l) => {
+    const rows = [`[${stamp(Number(l.t) || started)}]${l.failed ? "  (not translated)" : ""}`,
+                  `    ${String(l.src || "").trim()}`];
+    for (const lang of langs) {
+      const txt = String((l.tr || {})[lang.c] || "").trim();
+      if (txt) rows.push(`    ${lang.c}: ${txt}`);
+    }
+    return rows.join("\n");
+  });
+  return head.concat(body).join("\n") + "\n";
+}
+
+$("dlTextBtn").onclick = () => {
+  if (!doc.lines.length) { toast(t("noTranscript"), "bad"); return; }
+  const blob = new Blob([transcriptText()], { type: "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  const day = new Date(Number(doc.startedAt) || Date.now()).toISOString().slice(0, 10);
+  a.download = `${(doc.title || "spark-live").replace(/[^\w一-龥-]+/g, "_")}_${day}.txt`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+};
+
 window.addEventListener("beforeunload", (e) => {
   if (engine && doc.live) { e.preventDefault(); e.returnValue = ""; }
 });
