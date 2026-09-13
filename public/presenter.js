@@ -216,6 +216,7 @@ readiness();
 function announceIdle() {
   doc.title = $("title").value.trim() || "Spark Live";
   doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
+  renderDlLangs();
   doc.live = false;
   doc.ended = false;
   schedulePush();
@@ -261,9 +262,22 @@ async function adoptLiveSession() {
   doc.startedAt = Number(stored.startedAt) || Date.now();
   doc.live = true;
   doc.ended = false;
+  // Bring the whole transcript back, not just the 120 lines the relay keeps —
+  // otherwise a mid-service reload silently truncates the download.
+  try {
+    const f = JSON.parse(LS.get("full") || "null");
+    if (f && f.session === session && Array.isArray(f.lines)) {
+      all.length = 0;
+      for (const l of f.lines) all.push(l.pending ? { ...l, pending: false, failed: true } : l);
+      markSeq = all.reduce((m, l) => Math.max(m, /^m(\d+)$/.test(String(l.id)) ? +String(l.id).slice(1) : 0), 0);
+    }
+  } catch { /* the capped copy in doc.lines is still there */ }
+  if (!all.length) for (const l of doc.lines) all.push(l);
+  mark("resumed", t("markResumed"));
   if (doc.title) $("title").value = doc.title;
 
   renderLines();
+  renderDlLangs();
   $("setupPanel").style.display = "none";
   $("livePanel").style.display = "";
   $("dot").className = "dot";
@@ -285,6 +299,16 @@ function writeLocalMirror() {
       live: doc.live, startedAt: doc.startedAt, updatedAt: Date.now(),
     }));
   } catch { /* private mode, or quota — the relay copy still covers us */ }
+  // The full transcript is written SEPARATELY and second, on purpose. It is
+  // the big one and the only one that can plausibly hit the quota, and if it
+  // does it must not take the small resume mirror down with it — losing the
+  // download is bad, losing the ability to resume mid-service is worse.
+  try {
+    LS.set("full", JSON.stringify({ session, lines: all }));
+  } catch {
+    try { LS.set("full", JSON.stringify({ session, lines: all.slice(-Math.ceil(all.length / 2)), clipped: true })); }
+    catch { /* nothing more to give up */ }
+  }
 }
 function readLocalMirror() {
   try {
@@ -330,6 +354,7 @@ function renderLangPick() {
       if (engine) {
         engine.cfg.targets = targets.slice();
         doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
+  renderDlLangs();
         renderLines(); schedulePush();
       }
     };
@@ -415,6 +440,7 @@ window.addEventListener("ui:lang", () => {
   applyI18n(); renderLangPick(); renderPreviewLang(); readiness();
   syncAsrOption();   // its hint has two states, so applyI18n cannot own it
   $("copyBtn").textContent = t("copyLink");
+  renderDlLangs();
   if (doc.lines.length) renderLines();
 });
 
@@ -427,6 +453,9 @@ const conn = createConnection({
     document.body.classList.toggle("offline", !online);
     if (!online) toast(t("offline"), "bad");
     else if (engine && engine.running) toast(t("backOnline"), "ok");
+    // Only while a service is running: a blip on the setup screen is not a
+    // hole in anybody's recording.
+    if (engine && doc.live) mark(online ? "on" : "off", t(online ? "markOnline" : "markOffline"));
   },
 });
 
@@ -435,7 +464,46 @@ const doc = {
   v: 0, title: "", live: false, ended: false, draft: "", interim: "",
   langs: [], startedAt: Date.now(), lines: [],
 };
+
+/* THE WHOLE SERVICE. `doc.lines` is the publish payload and is deliberately
+   capped at 120 so the relay document stays small — but that cap was also the
+   only copy the presenter kept, so the transcript file it wrote out held the
+   last 120 lines and nothing else. On 2026-09-13 a 70-minute sermon downloaded
+   as 120 lines and the rest was simply gone. This array is never trimmed; the
+   downloads read from here, the relay still gets the tail. */
+const all = [];
+let markSeq = 0;
+
+function record(line) {
+  const i = all.findIndex((x) => x.id === line.id);
+  if (i >= 0) all[i] = line; else all.push(line);
+}
+
+/**
+ * Put a marker in the transcript — "the connection dropped here".
+ *
+ * The presenter already saw "Publish failed Failed to fetch" on screen during
+ * the 2026-09-13 service, but that is a transient error message: by the time
+ * anyone edits the recording on Monday there is nothing in the file saying
+ * where the gap was. A marker is a line like any other, so it carries a
+ * timestamp, survives into the file, and lands in the right place in the
+ * order things happened.
+ *
+ * It is NOT sent to the room: the audience does not need to be told the
+ * presenter's wifi blinked, and `viewer.js` filters marks out.
+ */
+function mark(kind, text) {
+  const last = all[all.length - 1];
+  if (last && last.mark && last.markKind === kind) return;   // don't stutter
+  const line = { id: `m${++markSeq}`, mark: true, markKind: kind,
+                 src: text, tr: {}, t: Date.now() };
+  record(line);
+  doc.lines.push(line);
+  renderLines();
+  schedulePush();
+}
 let publisher = createPublisher({ session, token });
+let asrDown = false;
 let engine = null;
 let pushTimer = null;
 
@@ -470,6 +538,7 @@ function renderLines() {
   const primary = activePreview();
   const rtl = (LANGS[primary] || {}).rtl;
   $("lines").innerHTML = doc.lines.slice(-25).reverse().map((l) => {
+    if (l.mark) return `<div class="line mark"><div class="src">— ${esc(l.src)} —</div></div>`;
     const main = (l.tr && l.tr[primary]) || "";
     return `<div class="line ${l.pending ? "pending" : ""} ${l.failed ? "failed" : ""}">
       <div class="dari ${rtl ? "rtl" : ""}">${esc(main) || (l.pending ? t("translating") : "—")}</div>
@@ -613,6 +682,10 @@ async function beginCapture({ resume = false } = {}) {
     },
     status: (s) => {
       $("dot").classList.toggle("bad", !!s.stalled);
+      // The speech socket cycling is its own kind of gap — the room keeps its
+      // internet and the transcript still loses the words spoken across it.
+      if (s.reconnecting) { asrDown = true; mark("asr_off", t("markAsrDown")); }
+      else if (s.connected && asrDown) { asrDown = false; mark("asr_on", t("markAsrUp")); }
       // The microphone came back — clear the warning, or the console keeps
       // accusing an input that is working again.
       if (s.stalled === false) { showErr(""); toast(t("micBack"), "ok"); }
@@ -621,6 +694,7 @@ async function beginCapture({ resume = false } = {}) {
       if (s.exhausted === false) { showErr(""); toast(t("quotaBack"), "ok"); }
     },
     line: (l) => {
+      record(l);
       const i = doc.lines.findIndex((x) => x.id === l.id);
       if (i >= 0) doc.lines[i] = l; else doc.lines.push(l);
       if (doc.lines.length > 120) doc.lines.splice(0, doc.lines.length - 120);
@@ -657,6 +731,7 @@ async function beginCapture({ resume = false } = {}) {
 
   doc.title = $("title").value.trim() || "Spark Live";
   doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
+  renderDlLangs();
   doc.live = true; doc.ended = false;
   // Resuming keeps the original start time: the service did not restart just
   // because the presenter's browser did.
@@ -770,47 +845,89 @@ $("dlBtn").onclick = async () => {
  * The transcript as a file, for the review that happens after the service.
  *
  * Everything the room saw, in the order it was said: the corrected source and
- * every translation of it, side by side under a timestamp, so a mistake spotted
- * on Sunday can be found in the audio on Monday and turned into a glossary
- * entry. Plain text on purpose — it has to open on any machine in the church
- * and be editable by whoever is doing the correcting.
+ * every translation of it under a timestamp, so a mistake spotted on Sunday can
+ * be found in the audio on Monday and turned into a glossary entry.
+ *
+ * Three things it has to survive, all three learned from the file the church
+ * actually downloaded on 2026-09-13:
+ *
+ *  - **It has to be the whole service.** It reads `all`, never `doc.lines` —
+ *    that one is capped at 120 for the relay, and the capped copy is what got
+ *    written out: a 70-minute sermon arrived as its last 120 lines.
+ *  - **It is opened in Notepad on the church's Windows laptop.** Notepad breaks
+ *    lines on CRLF and nothing else, so the LF-only file it got rendered as a
+ *    single unreadable paragraph. Hence \r\n throughout, and a BOM so the
+ *    encoding is not guessed and the Dari not mangled.
+ *  - **One language at a time is often what is wanted.** Whoever checks the
+ *    Dari does not want the Chinese in the way, so `only` narrows it and the
+ *    source text always stays, because a translation cannot be corrected
+ *    without the line it came from.
  */
-function transcriptText() {
-  const langs = Array.isArray(doc.langs) ? doc.langs : [];
+function transcriptText(only) {
+  const langs = (Array.isArray(doc.langs) ? doc.langs : [])
+    .filter((l) => !only || l.c === only);
   const started = Number(doc.startedAt) || Date.now();
   const stamp = (ms) => {
-    const s = Math.max(0, Math.round((ms - started) / 1000));
+    const sec = Math.max(0, Math.round((ms - started) / 1000));
     const p2 = (n) => String(n).padStart(2, "0");
-    return `${p2(Math.floor(s / 3600))}:${p2(Math.floor(s / 60) % 60)}:${p2(s % 60)}`;
+    return `${p2(Math.floor(sec / 3600))}:${p2(Math.floor(sec / 60) % 60)}:${p2(sec % 60)}`;
   };
+  const RULE = "-".repeat(62);
+  const spoken = all.filter((l) => !l.mark);
   const head = [
     doc.title || "Spark Live",
-    `${new Date(started).toLocaleString()} · ${doc.lines.length} lines`,
-    `Source → ${langs.map((l) => l.label || l.c).join(", ") || "(no translation)"}`,
+    `${new Date(started).toLocaleString()}   ·   ${spoken.length} lines`,
+    langs.length ? `Source  ->  ${langs.map((l) => l.label || l.c).join(",  ")}`
+                 : "Source only (no translation)",
+    RULE,
     "",
   ];
-  const body = doc.lines.map((l) => {
-    const rows = [`[${stamp(Number(l.t) || started)}]${l.failed ? "  (not translated)" : ""}`,
-                  `    ${String(l.src || "").trim()}`];
+  const body = [];
+  for (const l of all) {
+    if (l.mark) {
+      // A gap is the one thing somebody editing the recording is hunting for,
+      // so it gets the full width of the page rather than a quiet note.
+      body.push(RULE, `[${stamp(Number(l.t) || started)}]  *** ${String(l.src || "").trim()} ***`, RULE, "");
+      continue;
+    }
+    body.push(`[${stamp(Number(l.t) || started)}]${l.failed ? "   (not translated)" : ""}`);
+    body.push(`   ${String(l.src || "").trim()}`);
     for (const lang of langs) {
       const txt = String((l.tr || {})[lang.c] || "").trim();
-      if (txt) rows.push(`    ${lang.c}: ${txt}`);
+      if (txt) body.push(`   ${lang.label || lang.c}:  ${txt}`);
     }
-    return rows.join("\n");
-  });
-  return head.concat(body).join("\n") + "\n";
+    body.push("");
+  }
+  // BOM + CRLF: this file's job is to open correctly in Windows Notepad.
+  return "\uFEFF" + head.concat(body).join("\r\n") + "\r\n";
 }
 
-$("dlTextBtn").onclick = () => {
-  if (!doc.lines.length) { toast(t("noTranscript"), "bad"); return; }
-  const blob = new Blob([transcriptText()], { type: "text/plain;charset=utf-8" });
+function saveTranscript(only) {
+  if (!all.some((l) => !l.mark)) { toast(t("noTranscript"), "bad"); return; }
+  const blob = new Blob([transcriptText(only)], { type: "text/plain;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   const day = new Date(Number(doc.startedAt) || Date.now()).toISOString().slice(0, 10);
-  a.download = `${(doc.title || "spark-live").replace(/[^\w一-龥-]+/g, "_")}_${day}.txt`;
+  const tag = only ? `_${only}` : "";
+  a.download = `${(doc.title || "spark-live").replace(/[^\w一-龥-]+/g, "_")}_${day}${tag}.txt`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-};
+}
+
+$("dlTextBtn").onclick = () => saveTranscript(null);
+
+/* One button per language next to the all-languages one. Asked for directly:
+   the person checking the Dari and the person checking the Chinese are not the
+   same person and do not want each other's text in the file. */
+function renderDlLangs() {
+  const el = $("dlLangs");
+  if (!el) return;
+  const langs = Array.isArray(doc.langs) ? doc.langs : [];
+  el.style.display = langs.length > 1 ? "" : "none";
+  el.innerHTML = langs.map((l) =>
+    `<button class="iconbtn lang" data-c="${l.c}"${l.rtl ? ' lang="prs"' : ""}>${esc(l.label || l.c)}</button>`).join("");
+  for (const b of el.querySelectorAll(".lang")) b.onclick = () => saveTranscript(b.dataset.c);
+}
 
 window.addEventListener("beforeunload", (e) => {
   if (engine && doc.live) { e.preventDefault(); e.returnValue = ""; }

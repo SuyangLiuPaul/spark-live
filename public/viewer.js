@@ -116,7 +116,9 @@ function render(doc) {
   }
 
   const lines = Array.isArray(doc.lines) ? doc.lines : [];
-  const shown = lines.filter((l) => pick(l) || !l.pending);
+  // Connection markers are for whoever edits the recording afterwards; the
+  // room does not need to be told the presenter's wifi blinked.
+  const shown = lines.filter((l) => !l.mark && (pick(l) || !l.pending));
 
   // Signature check keeps us from re-rendering (and killing the animation)
   // on every poll when nothing actually changed.

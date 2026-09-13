@@ -506,3 +506,8 @@ textarea.short{min-height:52px}
 .uidrop-menu .tick{color:var(--accent2); font-size:12px; opacity:0}
 .uidrop-menu button[aria-selected="true"] .tick{opacity:1}
 .uidrop-menu button[aria-selected="true"]{color:var(--accent)}
+
+/* A connection gap in the presenter's own log. Deliberately quiet — it is a
+   note to whoever edits the recording, not an alarm mid-service. */
+.line.mark{border-left-color:var(--warn);opacity:.75}
+.line.mark .src{font-style:italic;text-align:center}

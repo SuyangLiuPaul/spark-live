@@ -78,6 +78,17 @@ const EXHAUSTED_BACKOFF_MS = 60000;
 const SILENCE_FLUSH_MS = 700; // a pause this long ends a unit
 const MAX_SENTENCE_CHARS = 150;
 const MAX_UNIT_WAIT_MS = 6000;// never sit on committed text longer than this
+// A sentence may be taken out of an INTERIM once the server has moved past it.
+// Measured against the relay on 2026-09-13: "Good morning everyone." was complete
+// in the interim at 3.0 s and the final for that utterance did not arrive until
+// 8.7 s. Waiting for the final is what put a whole paragraph on the room's screen
+// at once when the speaker never paused. Trailing text is the server's own proof
+// that it has committed to the sentence.
+const wordsOf = (s) => String(s || "").trim().split(/\s+/).filter(Boolean);
+// normWord lives with the stabiliser below; both users want the same thing —
+// a word stripped of exactly the case and punctuation the ASR keeps changing.
+
+const HARVEST_TAIL_CHARS = 3;
 // Streaming ASR: how long the server may stay silent WHILE SPEECH IS ARRIVING
 // before the socket is cycled. Interims normally come several times a second
 // during speech, so 20 s of nothing is a dead session, not a pause.
@@ -1003,6 +1014,7 @@ export class LiveEngine {
     this.translateQueue = Promise.resolve();
     this.pendingSince = 0;
     this._interimAt = 0; this._interimSrc = ""; this._interimBusy = false;
+    this._gUttEmitted = "";   // text already taken out of the CURRENT utterance
     this.archive = [];         // PCM fallback only — see PCM_ARCHIVE_MAX
     this.archiveLen = 0;
     this.archiveTruncated = false;
@@ -1074,7 +1086,11 @@ export class LiveEngine {
       glossary: this.cfg.glossary,
       onInterim: (t) => {
         this._gInterim = t;
-        const tail = ((this.sentence || "") + " " + t).replace(/\s+/g, " ").trim();
+        // Take any sentence the server has already moved past, rather than
+        // holding the whole utterance until it finalizes.
+        this._harvest(t);
+        const tail = ((this.sentence || "") + " " + this._unharvested(t))
+          .replace(/\s+/g, " ").trim();
         this.on.draft(tail);
         this._interim(tail);
       },
@@ -1082,7 +1098,11 @@ export class LiveEngine {
         this._gInterim = "";
         this.asrCalls = (this.asrCalls || 0) + 1;
         this.lastAsrAt = Date.now();
-        this._commit(t);
+        // The final restates the ENTIRE utterance, including whatever the
+        // interims already put on screen — commit only what is new.
+        const rest = this._dropHarvested(t);
+        this._gUttEmitted = "";
+        if (rest) this._commit(rest);
         this.on.draft((this.sentence || "").trim());
       },
       onStatus: (s) => this.on.status({ running: true, asr: "gemini", ...s }),
@@ -1415,6 +1435,83 @@ Reply with JSON only: {"t":"..."}`;
       .then((raw) => { const o = parseJson(raw) || {}; if (o.t) this.on.interim(String(o.t).trim()); })
       .catch(() => {})
       .finally(() => { this._interimBusy = false; });
+  }
+
+  /* ── taking a sentence out of a live interim ─────────────────────────────
+   *
+   * Measured against the relay on 2026-09-13 with tools/fixtures/speech-16k.wav:
+   * the interim is the whole utterance so far, and the FINAL restates that same
+   * utterance from the beginning while rewriting it — interim "Romans chapter 8
+   * where Paul writes", final "Romans, chapter eight, where Paul writes". Two
+   * consequences, and both of these methods exist because of them:
+   *
+   *   1. A finished sentence is visible in an interim long before the final.
+   *      "Good morning everyone." was complete at 3.0 s; the final arrived at
+   *      8.7 s. On a speaker who pauses, that 5.7 s is invisible because the
+   *      pause triggers the final anyway. On one who does not pause — Anne on
+   *      2026-09-13, filling every gap with "uh" and "right?" — the wait runs
+   *      to the length of a whole paragraph, which then lands on the room's
+   *      screen in one block and is pushed off before anyone can read it.
+   *   2. The prefix already sent CANNOT be removed from the final by string
+   *      comparison, because the final has rewritten it. It has to go by word
+   *      count, anchored on the last words actually sent.
+   */
+
+  /** The part of the current interim that has not been sent as a line yet. */
+  _unharvested(text) {
+    const n = wordsOf(this._gUttEmitted).length;
+    return n ? wordsOf(text).slice(n).join(" ") : String(text || "");
+  }
+
+  /**
+   * Send every sentence this interim has finished AND moved past.
+   *
+   * "Moved past" carries the whole safety argument. A terminator with more
+   * words after it is the server's own statement that it has settled that
+   * sentence; a terminator at the very END of an interim is still a guess and
+   * routinely vanishes on the next frame.
+   */
+  _harvest(text) {
+    const all = wordsOf(text);
+    let taken = wordsOf(this._gUttEmitted).length;
+    // Fewer words than we have already taken means the server moved on to a
+    // new utterance: there is nothing left to de-duplicate against.
+    if (all.length < taken) { this._gUttEmitted = ""; taken = 0; }
+    const rest = all.slice(taken);
+    if (rest.length < 2) return;
+    let end = -1;
+    for (let i = 0; i < rest.length - 1; i++) {
+      if (/[.!?。！？…]["\'”’)\]]?$/.test(rest[i])) end = i;
+    }
+    if (end < 0) return;
+    if (rest.slice(end + 1).join(" ").length < HARVEST_TAIL_CHARS) return;
+    this._gUttEmitted = all.slice(0, taken + end + 1).join(" ");
+    this._commit(rest.slice(0, end + 1).join(" "));
+  }
+
+  /**
+   * Drop from a final whatever the interims have already put on screen.
+   *
+   * Anchored on the last two words sent rather than on the count alone, because
+   * the final can spell a number out ("8" → "eight") and move the boundary by a
+   * word. If the anchor is nowhere near where it should be, the raw count is
+   * used: showing the room the same sentence twice is a worse failure than
+   * clipping a word off the front of the next one.
+   */
+  _dropHarvested(text) {
+    const emitted = wordsOf(this._gUttEmitted);
+    if (!emitted.length) return String(text || "");
+    const fw = wordsOf(text);
+    const n = emitted.length;
+    const a = normWord(emitted[n - 1]);
+    const b = n > 1 ? normWord(emitted[n - 2]) : "";
+    const fits = (k) => k >= 1 && k <= fw.length && normWord(fw[k - 1]) === a
+      && (!b || k < 2 || normWord(fw[k - 2]) === b);
+    let cut = Math.min(n, fw.length);
+    for (const k of [n, n - 1, n + 1, n - 2, n + 2, n - 3, n + 3]) {
+      if (fits(k)) { cut = k; break; }
+    }
+    return fw.slice(cut).join(" ");
   }
 
   _commit(text) {

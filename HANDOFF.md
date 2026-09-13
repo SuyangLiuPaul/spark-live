@@ -280,6 +280,36 @@ cannot debug them:
 - **Actionable errors** — `NotAllowedError` etc. become sentences telling the
   presenter what to do; exhausted keys say so explicitly.
 
+- **Gemini's final restates the WHOLE utterance, and rewrites it.** Measured against
+  the relay on 2026-09-13 with `tools/fixtures/speech-16k.wav`: the interim grows
+  cumulatively ("Good" → "Good morning" → "Good morning everyone."), and the final
+  repeats all of it with different words — interim "Romans chapter 8 where Paul
+  writes", final "Romans, chapter eight, where Paul writes". Two consequences the
+  engine depends on: a finished sentence is visible in an interim **5.7 s before**
+  the final (3.0 s vs 8.7 s in that run), and the already-shown prefix cannot be
+  removed from the final by string comparison — `_dropHarvested()` removes it by
+  word count, anchored on the last two words actually sent.
+- **Waiting for the final is what dumps a paragraph on the room.** A speaker who
+  pauses hides this, because the pause triggers the final anyway. Anne on
+  2026-09-13 filled every gap with "uh" and "right?", so nothing finalized for the
+  length of a whole paragraph and then all of it arrived at once and scrolled away.
+  `_harvest()` takes a sentence out of the interim as soon as the server has put
+  more words after it — trailing text is the server's own proof it has settled.
+- **`doc.lines` is the publish payload, not the transcript.** It is capped at 120
+  so the relay document stays small, and for a while that cap was the only copy
+  the presenter kept: a 70-minute sermon downloaded as its last 120 lines. `all`
+  is the untrimmed transcript and is what the downloads read. It is mirrored to
+  localStorage under `full`, written *after* the small resume mirror so a quota
+  failure cannot cost the ability to resume mid-service.
+- **The transcript file is opened in Notepad on the church's Windows laptop.**
+  Notepad breaks lines on CRLF and nothing else, so the LF-only file arrived as
+  one unreadable paragraph. The file is CRLF throughout and starts with a BOM so
+  the encoding is not guessed and the Dari is not mangled.
+- **Connection gaps are recorded as lines.** `mark()` puts a timestamped marker
+  into the transcript when the internet drops or the speech socket cycles, so
+  whoever edits the recording on Monday can find the hole. Marks are filtered out
+  of `viewer.js` — the room does not need to be told the presenter's wifi blinked.
+
 **`requestAnimationFrame` never fires in a hidden tab.** Anything that must be
 correct on first paint (measuring overflow, setting a class) has to be
 synchronous, or a page opened in a background tab renders wrong and stays wrong
