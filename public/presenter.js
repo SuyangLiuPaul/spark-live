@@ -735,7 +735,30 @@ async function beginCapture({ resume = false } = {}) {
   doc.live = true; doc.ended = false;
   // Resuming keeps the original start time: the service did not restart just
   // because the presenter's browser did.
-  if (!resume) doc.startedAt = Date.now();
+  //
+  // A start that is NOT a resume is a new service, and the previous one has to
+  // go with it. `all` is the only full copy the presenter keeps, it lives at
+  // module scope and is never trimmed, so a console left open since last Sunday
+  // still holds that transcript: the download wrote BOTH services into one
+  // file, and since `startedAt` has just moved forward the old lines' stamps
+  // clamped to 00:00:00 and interleaved with the new ones instead of sorting
+  // before them. Reported after the 2026-09-20 meeting as "the transcript I
+  // downloaded is still the file from last week", with exactly those
+  // out-of-order timestamps in it.
+  //
+  // This sits AFTER engine.start() resolved, so a start that fails on a denied
+  // or missing microphone leaves the finished transcript intact and still
+  // downloadable — the operator gets another go at the mic without paying for
+  // it with last week's file. Nothing can have been recorded into `all` between
+  // that await and here: lines only ever arrive through an async callback, and
+  // nothing in between suspends this function — `renderMics()` is async but is
+  // deliberately not awaited, so control reaches the reset synchronously.
+  if (!resume) {
+    doc.startedAt = Date.now();
+    all.length = 0;
+    doc.lines.length = 0;
+    markSeq = 0;
+  }
   schedulePush();
 
   renderPreviewLang();
