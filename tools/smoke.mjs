@@ -291,6 +291,36 @@ await section("a dropped translation is retried", async () => {
   }
 });
 
+/* ═══ 7b. a 429 burst on the proxy is retried, not just a transport drop ═══
+   /api/chat already rotated the whole server-side key pool before answering,
+   so 429 reaching here means all of them were momentarily out AT ONCE — a
+   burst, not the day's budget (a real service reported this with 11.8h and
+   8 keys still on the books, per /api/quota above). The proxy step has no
+   pool of its own to rotate through the way a BYOK step does on a 429, so
+   this used to go straight to `break` and lose the sentence for good.
+   Reported 2026-09-27: exactly this, mid-service, sentences never recovered. */
+await section("a 429 burst on the proxy is retried", async () => {
+  const outer = globalThis.fetch;
+  let dropped = 0;
+  globalThis.fetch = async (u, init) => {
+    const body = String(init?.body || "");
+    if (String(u).includes("/api/chat") && !body.includes(INTERIM_MODEL_HINT) && dropped === 0) {
+      dropped = 1;
+      return { ok: false, status: 429, json: async () => ({ error: "upstream", status: 429 }) };
+    }
+    return outer(u, init);
+  };
+  try {
+    const r = await runEngine(SPEECH, { seconds: 14, language: "en" });
+    check("the 429 was actually injected", dropped === 1);
+    check("the sentence is still translated", r.translated.length > 0,
+          `translated=${r.translated.length} failed=${r.lines.filter((l) => l.failed).length}`);
+    check("no line is left marked failed", r.lines.every((l) => !l.failed));
+  } finally {
+    globalThis.fetch = outer;
+  }
+});
+
 /* ═══ 8. the relay survives a presenter reload ═══
    A reload republished v=1 over a stored v=40 (freezing every phone), and
    published an empty idle document (blanking every phone). Both are asserted,
