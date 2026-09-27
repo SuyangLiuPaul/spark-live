@@ -504,6 +504,15 @@ function mark(kind, text) {
 }
 let publisher = createPublisher({ session, token });
 let asrDown = false;
+let asrDownTimer = null;
+// The relay's audio-gap buffer already replays up to 90 s of held audio once
+// it reconnects (see gemini-asr.js's GAP_MAX_SAMPLES), so a blip shorter than
+// this is not actually a loss — just a beat of delay the replay makes up.
+// Marking every one of those anyway is what turned a real but recoverable
+// service into a transcript that "doesn't seem usable, too many breaks":
+// reported 2026-09-27, a run of drop/reconnect pairs seconds apart, most of
+// them well under this window. Only a gap that outlasts it gets the marker.
+const ASR_MARK_DEBOUNCE_MS = 3000;
 let engine = null;
 let pushTimer = null;
 
@@ -684,8 +693,22 @@ async function beginCapture({ resume = false } = {}) {
       $("dot").classList.toggle("bad", !!s.stalled);
       // The speech socket cycling is its own kind of gap — the room keeps its
       // internet and the transcript still loses the words spoken across it.
-      if (s.reconnecting) { asrDown = true; mark("asr_off", t("markAsrDown")); }
-      else if (s.connected && asrDown) { asrDown = false; mark("asr_on", t("markAsrUp")); }
+      // But not every cycle is a gap: `reconnecting` fires again on EVERY
+      // failed retry attempt while still down, so debounce on the timer
+      // itself rather than the status flag — restarting it per retry would
+      // never fire until the backoff itself capped out.
+      if (s.reconnecting) {
+        if (!asrDown && !asrDownTimer) {
+          asrDownTimer = setTimeout(() => {
+            asrDownTimer = null;
+            asrDown = true;
+            mark("asr_off", t("markAsrDown"));
+          }, ASR_MARK_DEBOUNCE_MS);
+        }
+      } else if (s.connected) {
+        if (asrDownTimer) { clearTimeout(asrDownTimer); asrDownTimer = null; }
+        if (asrDown) { asrDown = false; mark("asr_on", t("markAsrUp")); }
+      }
       // The microphone came back — clear the warning, or the console keeps
       // accusing an input that is working again.
       if (s.stalled === false) { showErr(""); toast(t("micBack"), "ok"); }

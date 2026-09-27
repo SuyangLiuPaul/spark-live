@@ -913,6 +913,18 @@ export const LLM_PROVIDERS = {
  *
  * So transport errors and 5xx get another attempt; a 4xx (a real refusal —
  * wrong model, malformed request) still moves straight on.
+ *
+ * A 429 on the PROXY step is the same story with a twist: `/api/chat` already
+ * rotated through the whole server-side key pool before answering, so 429
+ * coming back here means all of them were momentarily out AT ONCE — not that
+ * the day's budget is spent (reported 2026-09-27 with 11.8h and 8 keys still
+ * on the books). Groq's per-key allowance refills continuously rather than at
+ * midnight, so a beat later a key is very likely free again. `e.exhausted` is
+ * already set for exactly this case (see proxyFetch). A BYOK step rotates its
+ * own pool on a 429; a proxy step has no pool of its own to rotate through, so
+ * without this it went straight to `break` and the line was gone for good —
+ * this is the gap that let a burst of translate_failed during that service
+ * lose sentences the pool would have recovered a second or two later.
  */
 const isTransient = (e) => !e || !e.status || e.status >= 500;
 const TRANSIENT_TRIES = 3;
@@ -943,6 +955,7 @@ async function askChain(chain, prompt, sys) {
       } catch (e) {
         errors.push(`${step.id}: ${e.message}`);
         if (e && e.status === 429 && step.pool) { step.pool.bench(key, e.retryAfter); continue; }
+        if (e && e.exhausted && !step.pool && a < tries - 1) { await backoff(a); continue; }
         if (isTransient(e) && a < tries - 1) { await backoff(a); continue; }
         break;
       }
