@@ -271,18 +271,42 @@ export class GeminiLiveAsr {
     const keyProblem = (code === 1007 || code === 1008)
       && (/api key|unregistered|unauthenticated|permission/i.test(why) || !why);
     if (keyProblem) {
-      this.o.onError && this.o.onError(new Error("asr_auth_rejected"));
+      const e = new Error("asr_auth_rejected");
+      e.reason = why;
+      this.o.onError && this.o.onError(e);
+      this.closed = true;
+      return;
+    }
+    // A spent balance is the other thing reconnecting cannot fix, and unlike a
+    // bad key it arrives as a plain 1011 — indistinguishable, by code alone,
+    // from a dropped socket. Measured against the live relay on 2026-10-04:
+    //
+    //   CLOSE code=1011 reason="Your prepayment credits are depleted. Please go
+    //   to AI Studio at https://ai.studio/projects to manage your project and bi"
+    //
+    // Retrying that six times buys nothing but ~25 s of dead transcript at the
+    // start of every service, so it ends the loop here instead and hands over
+    // to Whisper at once. The REASON is what matters: two Sundays were spent
+    // chasing WiFi and an old browser because all the operator ever saw was
+    // `asr_unreachable_1011`, while the relay had been saying "your credits are
+    // depleted" in the close frame the whole time. Carry it, always.
+    const spent = /credit|billing|quota|exhaust|deplet|insufficient|balance|payment/i.test(why);
+    if (spent) {
+      const e = new Error("asr_credits_depleted");
+      e.reason = why;
+      this.o.onError && this.o.onError(e);
       this.closed = true;
       return;
     }
     // Neither will anything else that keeps failing. Only 1007/1008 used to end
-    // this loop, so ANY other persistent fault — a spent balance (which arrives
-    // as a quota error, not an auth one, and through the relay as a plain 1011),
-    // a dead relay, a blocked origin — reconnected forever while the presenter
-    // watched "reconnecting…" and no transcript. Whisper was available the whole
-    // time. Measured before this guard: 8 reconnects in 40 s, never gave up.
+    // this loop, so ANY other persistent fault — a dead relay, a blocked origin
+    // — reconnected forever while the presenter watched "reconnecting…" and no
+    // transcript. Whisper was available the whole time. Measured before this
+    // guard: 8 reconnects in 40 s, never gave up.
     if (this.fails >= MAX_CONSECUTIVE_FAILS) {
-      this.o.onError && this.o.onError(new Error(`asr_unreachable_${code || "?"}`));
+      const e = new Error(`asr_unreachable_${code || "?"}`);
+      e.reason = why;
+      this.o.onError && this.o.onError(e);
       this.closed = true;
       return;
     }

@@ -683,11 +683,24 @@ async function beginCapture({ resume = false } = {}) {
         reporter.report("quota_exhausted", t("quotaOut"), msg);
         return;
       }
-      showErr(msg);
+      // Streaming ASR is out of credit. The service carries on — the engine has
+      // already fallen back to Whisper — but nobody can act on a bare
+      // `asr_unreachable_1011`, which is all this used to say, so say the thing
+      // that needs doing and keep Google's own wording as the report detail.
+      if (msg === "asr_credits_depleted") {
+        showErr(t("asrCredits")); toast(t("asrCredits"), "bad");
+        reporter.report("asr_failed", t("asrCredits"), e.reason || msg);
+        return;
+      }
+      // Everything else: the close reason, when there is one, is the only part
+      // worth reading — the numeric code alone sent us after the wrong cause
+      // twice.
+      const detail = e && e.reason ? `${msg} — ${e.reason}` : msg;
+      showErr(detail);
       // Only report a persistent transcription failure, not a one-off retry
       // that rotation already absorbed.
-      if (/ASR|asr/.test(msg)) reporter.report("asr_failed", "speech recognition failing", msg);
-      else reporter.report("translate_failed", "correction/translation failing", msg);
+      if (/ASR|asr/.test(msg)) reporter.report("asr_failed", "speech recognition failing", detail);
+      else reporter.report("translate_failed", "correction/translation failing", detail);
     },
     status: (s) => {
       $("dot").classList.toggle("bad", !!s.stalled);

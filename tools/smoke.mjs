@@ -321,6 +321,40 @@ await section("a 429 burst on the proxy is retried", async () => {
   }
 });
 
+/* ═══ 7c. a spent Gemini balance says so, and says it once ═══
+   Free and offline: drives the shipped _retry() directly. Two Sundays were
+   lost to this — the relay closes 1011 with "Your prepayment credits are
+   depleted" in the close frame, the client reported only the number, and the
+   search went to WiFi and an old browser instead of the billing page. It also
+   retried a balance six times over ~25 s of dead transcript before handing to
+   Whisper. Both asserted here: the reason survives, and a spent balance ends
+   the loop on the FIRST close, while an ordinary 1011 still gets its retries. */
+await section("a spent balance is named, not retried", async () => {
+  const { GeminiLiveAsr } = await import(path.join(ROOT, "public/gemini-asr.js"));
+  const DEPLETED = "Your prepayment credits are depleted. Please go to AI Studio at "
+    + "https://ai.studio/projects to manage your project and bi";
+
+  let err = null;
+  const a = new GeminiLiveAsr({ onError: (e) => { err = e; } });
+  a._retry(new Error("asr_socket_closed_1011"), 1011, DEPLETED);
+  check("a spent balance is its own error", err && err.message === "asr_credits_depleted",
+        err ? err.message : "no error raised");
+  check("Google's own wording survives to the operator",
+        !!(err && /prepayment credits are depleted/.test(err.reason || "")),
+        err ? String(err.reason).slice(0, 60) : "no reason carried");
+  check("it gives up on the first close, not the sixth", a.closed === true && a.fails === 1,
+        `closed=${a.closed} fails=${a.fails}`);
+
+  // The control: 1011 on its own is still just a dropped socket, and dropping
+  // the retries for THAT would hand every WiFi blip straight to Whisper.
+  let err2 = null;
+  const b = new GeminiLiveAsr({ onError: (e) => { err2 = e; }, onStatus: () => {} });
+  b._retry(new Error("asr_socket_closed_1011"), 1011, "upstream error");
+  check("an ordinary 1011 still retries", b.closed === false && err2 === null,
+        `closed=${b.closed} err=${err2 && err2.message}`);
+  b.stop();
+});
+
 /* ═══ 8. the relay survives a presenter reload ═══
    A reload republished v=1 over a stored v=40 (freezing every phone), and
    published an empty idle document (blanking every phone). Both are asserted,
