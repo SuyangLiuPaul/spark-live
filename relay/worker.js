@@ -54,11 +54,13 @@ export default {
     if (url.pathname === "/health") {
       return json({
         ok: true,
-        keyConfigured: !!env.GEMINI_API_KEY,
-        // Length only, never any part of the value: enough to tell a
+        keyConfigured: keysFrom(env).length > 0,
+        // Lengths only, never any part of a value: enough to tell a
         // whitespace-padded paste from a different key, and useless to anyone
         // who reads it. A Google API key is 39 characters.
-        keyLen: String(env.GEMINI_API_KEY || "").trim().length,
+        keyCount: keysFrom(env).length,
+        benchedKeys: keysFrom(env).filter((k) => isBenched(k)).length,
+        keyLens: keysFrom(env).map((k) => k.length),
         originsAllowed: String(env.ALLOWED_ORIGINS || "").split(",").filter(Boolean).length || "any",
         // Lower bounds, not truth — see the caveat above the declarations.
         sessionsSeenByThisIsolate: sessions,
@@ -72,7 +74,8 @@ export default {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
     }
-    if (!env.GEMINI_API_KEY) {
+    const keys = orderKeys(keysFrom(env));
+    if (!keys.length) {
       return new Response("relay not configured: set the GEMINI_API_KEY secret", { status: 503 });
     }
     // Origin is the only gate, deliberately. A shared access code was tried and
@@ -107,6 +110,10 @@ export default {
     let queued = [];
     let frames = 0;
     let closed = false;
+    // True once an upstream has ANSWERED. Until then every frame the page sends
+    // is kept (see the message handler) so a failed key can be replayed onto the
+    // next one — the setup frame above all, without which no session can start.
+    let established = false;
 
     const shut = (code, reason) => {
       if (closed) return;
@@ -122,12 +129,13 @@ export default {
 
     server.addEventListener("message", (e) => {
       frames++;
-      if (!upstream || upstream.readyState !== WebSocket.READY_STATE_OPEN) {
-        // Bounded: a page that keeps talking to a dead upstream must not grow
-        // this without limit. 600 frames is ~60 s of audio.
-        if (queued.length < 600) queued.push(e.data);
-        return;
-      }
+      // Keep everything until a key has answered, whether or not a socket is
+      // open right now. Google ACCEPTS the socket of a spent key and only then
+      // closes it, so "open" proves nothing — the setup frame has often already
+      // gone out on a socket that is about to die, and the next key needs it
+      // again. Bounded: 600 frames is ~60 s of audio.
+      if (!established && queued.length < 600) queued.push(e.data);
+      if (!upstream || upstream.readyState !== WebSocket.READY_STATE_OPEN) return;
       try { upstream.send(e.data); } catch (err) { shut(1011, "upstream send failed"); }
     });
     server.addEventListener("close", () => shut(1000, "client closed"));
@@ -137,38 +145,131 @@ export default {
     // pasted into `wrangler secret put` easily carries a trailing newline, and
     // Google's only reply to that is a flat "API key not valid" — a wrong
     // answer to look at for an hour when the key itself is fine.
-    const target = `${UPSTREAM}?key=${encodeURIComponent(String(env.GEMINI_API_KEY).trim())}`;
-    let res;
-    try {
-      res = await fetch(target, { headers: { Upgrade: "websocket" } });
-    } catch (err) {
-      // Carry the reason across — debugging this blind cost a deploy cycle.
-      shut(1011, `cannot reach upstream: ${String(err && err.message || err).slice(0, 60)}`);
-      return new Response(null, { status: 101, webSocket: client });
-    }
-    upstream = res.webSocket;
-    if (!upstream) {
-      // Google refused the upgrade — almost always a bad or unauthorised key.
-      // Say so on the socket, because the page has no other way to find out.
-      shut(1011, `upstream refused (${res.status})`);
-      return new Response(null, { status: 101, webSocket: client });
-    }
-    upstream.accept();
-    upstream.binaryType = "arraybuffer";  // see the note on server.binaryType
+    //
+    // WHY THERE IS MORE THAN ONE. A spent key does not refuse the upgrade; it
+    // accepts the socket and then closes it, and on 2026-10-04 that close read:
+    //
+    //   1011 "Your prepayment credits are depleted. Please go to AI Studio…"
+    //
+    // With a single key that ends the session — the page gives up on streaming
+    // and the service finishes on Whisper. So GEMINI_API_KEY may hold SEVERAL
+    // keys, comma- or whitespace-separated, and a key that dies this way hands
+    // over to the next one instead of taking the relay down. One key still
+    // works exactly as before.
+    //
+    // Note what is NOT claimed here: Google meters the free tier per PROJECT,
+    // so extra keys on the SAME project add no quota — they only add
+    // resilience. Keys from separate accounts do add quota, and Google's API
+    // terms §2.d say you "will not attempt to circumvent" their limits, so
+    // that is the operator's call to make knowingly, not a default this code
+    // quietly assumes.
+    const FATAL_KEY = /credit|billing|quota|exhaust|deplet|insufficient|balance|payment|api[ _]?key[ _]?(not[ _]?valid|invalid)|unauthenticated|unregistered|permission/i;
 
-    upstream.addEventListener("message", (e) => {
-      try { server.send(e.data); } catch { shut(1011, "client send failed"); }
-    });
-    upstream.addEventListener("close", (e) => shut(e.code || 1000, e.reason || "upstream closed"));
-    upstream.addEventListener("error", () => shut(1011, "upstream error"));
+    // Which upstream socket is the live one. A failed socket raises BOTH `close`
+    // and `error`, and an old socket can still deliver a message after its
+    // successor has taken over — measured against a stand-in Google: one spent
+    // key produced four connections to the good key and four setupComplete
+    // replies to the page, because each event started its own failover chain.
+    // So every socket carries its own number, handles at most ONE failure, and
+    // is ignored once superseded.
+    let generation = 0;
 
-    for (const f of queued) { try { upstream.send(f); } catch {} }
-    queued = [];
+    const connect = async (i) => {
+      if (closed || i >= keys.length) return false;
+      const mine = ++generation;
+      const key = keys[i];
+      let failed = false;
+      const live = () => mine === generation && !closed;
+
+      // This socket is finished: move to the next key, or end the session with
+      // the reason Google gave if there is none left. Runs once per socket.
+      const failOver = (code, reason, keyFault) => {
+        if (failed || !live()) return;
+        failed = true;
+        if (keyFault) bench(key);
+        if (!established && i + 1 < keys.length) {
+          console.log(`key ${i + 1}/${keys.length} failed (${String(reason).slice(0, 60)}) — trying the next`);
+          upstream = null;
+          connect(i + 1).then((ok) => { if (!ok) shut(code, reason); });
+          return;
+        }
+        shut(code, reason);
+      };
+
+      let res;
+      try {
+        res = await fetch(`${env.UPSTREAM_URL || UPSTREAM}?key=${encodeURIComponent(key)}`,
+                          { headers: { Upgrade: "websocket" } });
+      } catch (err) {
+        // Carry the reason across — debugging this blind cost a deploy cycle.
+        const why = `cannot reach upstream: ${String(err && err.message || err).slice(0, 60)}`;
+        if (i + 1 < keys.length && live()) return connect(i + 1);
+        shut(1011, why);
+        return false;
+      }
+      const ws = res.webSocket;
+      if (!ws) {
+        // Google refused the upgrade — almost always a bad or unauthorised key.
+        if (i + 1 < keys.length && live()) { bench(key); return connect(i + 1); }
+        shut(1011, `upstream refused (${res.status})`);
+        return false;
+      }
+      ws.accept();
+      ws.binaryType = "arraybuffer";  // see the note on server.binaryType
+
+      ws.addEventListener("message", (e) => {
+        if (!live()) return;                       // a superseded socket's late reply
+        // The first reply is proof this key works: stop holding frames for a
+        // replay that will now never happen.
+        if (!established) { established = true; queued = []; }
+        try { server.send(e.data); } catch { shut(1011, "client send failed"); }
+      });
+      ws.addEventListener("close", (e) => {
+        const reason = e.reason || "upstream closed";
+        // Closed before it ever answered, for a reason that is about the KEY
+        // rather than the audio: the next key may well be fine.
+        failOver(e.code || 1000, reason, !established && FATAL_KEY.test(reason));
+      });
+      ws.addEventListener("error", () => failOver(1011, "upstream error", false));
+
+      upstream = ws;
+      // Replay everything the page has sent so far, in order.
+      for (const f of queued) { try { ws.send(f); } catch {} }
+      return true;
+    };
+
+    await connect(0);
+    if (closed) return new Response(null, { status: 101, webSocket: client });
+
     sessions++;
 
     return new Response(null, { status: 101, webSocket: client });
   },
 };
+
+/**
+ * Keys for the upstream, in order. One key is the ordinary case and behaves
+ * exactly as it always did; several are separated by commas or whitespace.
+ * Trimmed per key — see the note at the connection site on trailing newlines.
+ */
+// A key that was just rejected for a KEY reason (spent, over quota, revoked) is
+// tried last for ten minutes, so a dead first key does not cost every new
+// session a wasted round-trip. Per-isolate memory, like the counters above —
+// it is an optimisation only, and a cold isolate simply relearns.
+const BENCH_MS = 10 * 60 * 1000;
+const benchedUntil = new Map();
+const bench = (k) => benchedUntil.set(k, Date.now() + BENCH_MS);
+const isBenched = (k) => (benchedUntil.get(k) || 0) > Date.now();
+function orderKeys(keys) {
+  return [...keys.filter((k) => !isBenched(k)), ...keys.filter((k) => isBenched(k))];
+}
+
+function keysFrom(env) {
+  return String(env.GEMINI_API_KEY || "")
+    .split(/[,\s]+/)
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
 
 function json(body) {
   return new Response(JSON.stringify(body, null, 1), {
