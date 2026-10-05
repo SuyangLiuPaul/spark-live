@@ -79,7 +79,12 @@ export default {
     // the account its session-resumption handle was issued under, while different
     // services land on different keys — that is the rotation. No sid (an old page,
     // a probe) just gets a random start.
-    const { keys, preferred } = orderKeys(keysFrom(env), url.searchParams.get("sid") || "");
+    const allKeys = keysFrom(env);
+    const { keys, preferred } = orderKeys(allKeys, url.searchParams.get("sid") || "");
+    // Name a key by where it sits in the secret (#1 is the first one pasted), so a
+    // log line says WHICH account is failing without ever containing a key. The
+    // order tried is rotated per session, so "the 2nd attempt" identifies nothing.
+    const nameOf = (k) => `#${allKeys.indexOf(k) + 1}/${allKeys.length}(len ${k.length})`;
     if (!keys.length) {
       return new Response("relay not configured: set the GEMINI_API_KEY secret", { status: 503 });
     }
@@ -212,7 +217,7 @@ export default {
         failed = true;
         if (keyFault) bench(key);
         if (!established && i + 1 < keys.length) {
-          console.log(`key ${i + 1}/${keys.length} failed (${String(reason).slice(0, 60)}) — trying the next`);
+          console.log(`key ${nameOf(key)} failed: ${String(reason).slice(0, 80)} — trying the next`);
           upstream = null;
           connect(i + 1).then((ok) => { if (!ok) shut(code, reason); });
           return;
@@ -245,11 +250,12 @@ export default {
         if (!live()) return;                       // a superseded socket's late reply
         // The first reply is proof this key works: stop holding frames for a
         // replay that will now never happen.
-        if (!established) { established = true; queued = []; }
+        if (!established) { established = true; queued = []; console.log(`key ${nameOf(key)} answered — session established`); }
         try { server.send(e.data); } catch { shut(1011, "client send failed"); }
       });
       ws.addEventListener("close", (e) => {
         const reason = e.reason || "upstream closed";
+        if (!established) console.log(`key ${nameOf(key)} closed before answering: ${e.code} ${String(reason).slice(0, 80)}`);
         // Closed before it ever answered, for a reason that is about the KEY
         // rather than the audio: the next key may well be fine.
         failOver(e.code || 1000, reason, !established && FATAL_KEY.test(reason));
