@@ -74,7 +74,12 @@ export default {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
     }
-    const keys = orderKeys(keysFrom(env));
+    // One service = one key. The page sends a random `sid` that stays the same
+    // across its reconnects, and it picks which key goes FIRST, so a sermon keeps
+    // the account its session-resumption handle was issued under, while different
+    // services land on different keys — that is the rotation. No sid (an old page,
+    // a probe) just gets a random start.
+    const { keys, preferred } = orderKeys(keysFrom(env), url.searchParams.get("sid") || "");
     if (!keys.length) {
       return new Response("relay not configured: set the GEMINI_API_KEY secret", { status: 503 });
     }
@@ -114,6 +119,25 @@ export default {
     // is kept (see the message handler) so a failed key can be replayed onto the
     // next one — the setup frame above all, without which no session can start.
     let established = false;
+    // The key the live socket is using. A session-resumption handle is issued by
+    // ONE key's session; presenting it under another key is, at best, rejected —
+    // which would make a failover useless exactly when it is needed. So when the
+    // key in use is not the one this session started on, the handle is removed
+    // from the setup frame (the one frame this ever touches) and the session
+    // simply starts fresh: the transcript carries on, only the server-side context
+    // is lost. Audio frames never contain the string and pass through untouched.
+    let currentKey = null;
+    const prep = (data) => {
+      if (currentKey === preferred || typeof data !== "string" || !data.includes('"handle"')) return data;
+      try {
+        const m = JSON.parse(data);
+        if (m && m.setup && m.setup.sessionResumption && m.setup.sessionResumption.handle) {
+          delete m.setup.sessionResumption.handle;
+          return JSON.stringify(m);
+        }
+      } catch { /* not JSON we understand: forward it verbatim */ }
+      return data;
+    };
 
     const shut = (code, reason) => {
       if (closed) return;
@@ -136,7 +160,7 @@ export default {
       // again. Bounded: 600 frames is ~60 s of audio.
       if (!established && queued.length < 600) queued.push(e.data);
       if (!upstream || upstream.readyState !== WebSocket.READY_STATE_OPEN) return;
-      try { upstream.send(e.data); } catch (err) { shut(1011, "upstream send failed"); }
+      try { upstream.send(prep(e.data)); } catch (err) { shut(1011, "upstream send failed"); }
     });
     server.addEventListener("close", () => shut(1000, "client closed"));
     server.addEventListener("error", () => shut(1011, "client error"));
@@ -232,9 +256,10 @@ export default {
       });
       ws.addEventListener("error", () => failOver(1011, "upstream error", false));
 
+      currentKey = key;
       upstream = ws;
       // Replay everything the page has sent so far, in order.
-      for (const f of queued) { try { ws.send(f); } catch {} }
+      for (const f of queued) { try { ws.send(prep(f)); } catch {} }
       return true;
     };
 
@@ -260,8 +285,26 @@ const BENCH_MS = 10 * 60 * 1000;
 const benchedUntil = new Map();
 const bench = (k) => benchedUntil.set(k, Date.now() + BENCH_MS);
 const isBenched = (k) => (benchedUntil.get(k) || 0) > Date.now();
-function orderKeys(keys) {
-  return [...keys.filter((k) => !isBenched(k)), ...keys.filter((k) => isBenched(k))];
+// FNV-1a: tiny, stable, and good enough to spread session ids over a few keys.
+function hash(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+/**
+ * Rotate the key list to start at this session's key, then move any key that was
+ * just rejected to the back. `preferred` is the key the session STARTS on, before
+ * any cooldown reshuffling — it is what the resumption handle was issued under.
+ */
+function orderKeys(keys, sid) {
+  if (!keys.length) return { keys, preferred: null };
+  const start = sid ? hash(sid) % keys.length : Math.floor(Math.random() * keys.length);
+  const rotated = keys.map((_, i) => keys[(start + i) % keys.length]);
+  return {
+    keys: [...rotated.filter((k) => !isBenched(k)), ...rotated.filter((k) => isBenched(k))],
+    preferred: rotated[0],
+  };
 }
 
 function keysFrom(env) {

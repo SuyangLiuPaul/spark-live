@@ -355,6 +355,41 @@ await section("a spent balance is named, not retried", async () => {
   b.stop();
 });
 
+/* ═══ 7d. one service keeps one Gemini key ═══
+   The relay may hold several keys and picks one per SESSION from an id the page
+   sends. That only works if the id is (a) on the URL, without clobbering a query
+   the URL already has, (b) the SAME across a sermon's reconnects — the resumption
+   handle is only valid under the key that issued it — and (c) different for a
+   different service, or nothing ever rotates. Offline: no Google, no relay. */
+await section("a service keeps one key, services spread", async () => {
+  const { GeminiLiveAsr } = await import(path.join(ROOT, "public/gemini-asr.js"));
+  const urls = [];
+  const outer = globalThis.WebSocket;
+  globalThis.WebSocket = class { constructor(u) { urls.push(String(u)); } close() {} send() {} };
+  try {
+    const a = new GeminiLiveAsr({ relay: "wss://r.example/asr?code=ABC", onError() {}, onStatus() {} });
+    a.start(); a._open(); a._open();                    // the first open, then two reconnects
+    const sids = urls.map((u) => (u.match(/[?&]sid=([a-z0-9]+)/) || [])[1]);
+    check("the id is appended to the relay URL", sids.every(Boolean), urls[0]);
+    check("an existing query string survives", urls.every((u) => /\?code=ABC&sid=/.test(u)), urls[0]);
+    check("reconnects of one sermon reuse the id", new Set(sids).size === 1, sids.join(" "));
+    a.stop();
+
+    const ids = new Set();
+    for (let i = 0; i < 20; i++) {
+      const before = urls.length;
+      const b = new GeminiLiveAsr({ relay: "wss://r.example/asr", onError() {}, onStatus() {} });
+      b.start(); b.stop();
+      ids.add((urls[before].match(/sid=([a-z0-9]+)/) || [])[1]);
+    }
+    check("different services get different ids", ids.size >= 15, `${ids.size}/20 distinct`);
+    const plain = urls[urls.length - 1];
+    check("a bare relay URL gets ?sid=, not &sid=", /\/asr\?sid=/.test(plain), plain);
+  } finally {
+    globalThis.WebSocket = outer;
+  }
+});
+
 /* ═══ 8. the relay survives a presenter reload ═══
    A reload republished v=1 over a stored v=40 (freezing every phone), and
    published an empty idle document (blanking every phone). Both are asserted,

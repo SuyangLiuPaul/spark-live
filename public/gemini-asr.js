@@ -117,6 +117,11 @@ export class GeminiLiveAsr {
     this.o = o;
     this.ws = null;
     this.handle = null;         // session resumption handle, survives reconnects
+    // Names this streaming session to the relay, so every reconnect of THIS sermon
+    // lands on the same Gemini key (the resumption handle is only valid there)
+    // while a different service can land on another key. Stable for the life of
+    // this object; a new Start makes a new object and so a new id.
+    this.sid = Math.random().toString(36).slice(2, 10);
     this.closed = false;
     this.connected = false;
     this.gap = [];              // Float32Array chunks captured while down
@@ -171,7 +176,7 @@ export class GeminiLiveAsr {
       // The relay URL is used verbatim — it may already carry ?code=, and the
       // key belongs on the far side of it, never here.
       ws = new WebSocket(this.o.relay
-        ? this.o.relay
+        ? this.o.relay + (this.o.relay.includes("?") ? "&" : "?") + "sid=" + this.sid
         : `${WS_BASE}?key=${encodeURIComponent(this.o.key)}`);
     } catch (e) {
       this._retry(e);
