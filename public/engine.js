@@ -99,6 +99,8 @@ const FRAGMENT_PATIENCE_MS = 2200;
 // line before it, so a burst of short sentences ran to six seconds), but are shown in
 // the order they were SPOKEN, and nothing waits on a stuck call forever.
 const TRANSLATE_PARALLEL = 3;
+// Live Translate: quiet on both streams for this long = a pause, flush and re-align.
+const TL_RESYNC_MS = 1800;
 const JOB_TIMEOUT_MS = 20000;
 // Streaming ASR: how long the server may stay silent WHILE SPEECH IS ARRIVING
 // before the socket is cycled. Interims normally come several times a second
@@ -1167,12 +1169,16 @@ export class LiveEngine {
     }
     // Streaming ASR replaces the Groq audio pool, not the chat chain: the LLM
     // still corrects and translates every settled sentence.
-    this.useGemini = this.cfg.asr === "gemini"
-      && (!!this.cfg.asrRelay || !!this.cfg.geminiKey);
+    const canStream = !!this.cfg.asrRelay || !!this.cfg.geminiKey;
+    // "translate": one Live Translate session hears AND translates; it rides the same
+    // streaming plumbing (relay, reconnect, gap replay) as "gemini".
+    this.translateMode = this.cfg.asr === "translate" && canStream;
+    this.useGemini = (this.cfg.asr === "gemini" || this.translateMode) && canStream;
     if (!this.useGemini && !this.cfg.proxy && !this.pool.size) throw new Error("missing_asr_key");
     if (!this.cfg.llmChain || !this.cfg.llmChain.length) throw new Error("missing_llm_key");
 
-    if (this.useGemini) this._startGemini();
+    if (this.translateMode) this._startTranslate();
+    else if (this.useGemini) this._startGemini();
 
     this.cap = new Capture((chunk, rate) => this._audio(chunk, rate));
     this.cap.deviceId = this.cfg.deviceId || "";
@@ -1208,6 +1214,83 @@ export class LiveEngine {
    * no LocalAgreement here — a finalized segment goes straight into the same
    * _commit() the Whisper path feeds, and everything downstream is unchanged.
    */
+  /**
+   * Live Translate. The source and its translation both arrive as running pieces,
+   * a fraction of a second apart, and are cut into lines here: a line is made when
+   * the TRANSLATION finishes a sentence, and takes the same number of sentences from
+   * the source. Pairing by count can slip by one when the model merges or splits a
+   * sentence, so every pause (TL_RESYNC_MS of silence on both sides) sends whatever
+   * is left of both together, which puts the two streams back in step.
+   */
+  _startTranslate() {
+    const to = this.cfg.translateTo || "fa";
+    this._tl = { src: "", out: "", at: Date.now() };
+    this.gasr = new GeminiLiveAsr({
+      relay: this.cfg.asrRelay,
+      key: this.cfg.geminiKey,
+      translateTo: to,
+      onHeard: (piece) => {
+        this._tl.src += piece; this._tl.at = Date.now();
+        this.asrCalls = (this.asrCalls || 0) + 1;
+        this.lastAsrAt = Date.now();
+        this.on.draft(this._tl.src.replace(/\s+/g, " ").trim());
+      },
+      onTranslation: (piece) => {
+        this._tl.out += piece; this._tl.at = Date.now();
+        this._tlEmit(false);
+        this.on.interim(this._tl.out.replace(/\s+/g, " ").trim());
+      },
+      onStatus: (s) => this.on.status({ running: true, asr: "translate", ...s }),
+      onError: (e) => {
+        // Same promise as streaming ASR: losing the session must not end the service.
+        // Whatever was heard but not yet shown goes out first; after that the Whisper
+        // path takes over and translates into the SAME language, so the room does not
+        // change scripts mid-service.
+        this._tlEmit(true);
+        this.translateMode = false;
+        this.useGemini = false;
+        this.gasr = null;
+        this.on.status({ running: true, asr: "whisper", fellBack: true });
+        this.on.error(e);
+      },
+    });
+    this.gasr.start();
+  }
+
+  /** Cut finished sentences off the two running streams and show them as lines. */
+  _tlEmit(all) {
+    const tl = this._tl;
+    if (!tl) return;
+    const END = /[.!?。！？؟…]["'”’»)\]]?(?=\s|$)/g;
+    const ends = (text) => { const r = []; let m; END.lastIndex = 0; while ((m = END.exec(text))) r.push(m.index + m[0].length); return r; };
+    const target = this.cfg.translateTo || "fa";
+    const send = (src, out) => {
+      src = src.replace(/\s+/g, " ").trim(); out = out.replace(/\s+/g, " ").trim();
+      if (!src && !out) return;
+      const id = ++this.seq;
+      this._sentNorm.push(...wordsOf(src).map(normWord).filter(Boolean));
+      if (this._sentNorm.length > 120) this._sentNorm.splice(0, this._sentNorm.length - 120);
+      this._lastSendAt = Date.now();
+      this.on.line({ id, src, tr: { [target]: out }, pending: false, via: "live-translate", t: Date.now() });
+    };
+    if (all) {
+      send(tl.src, tl.out); tl.src = ""; tl.out = "";
+    } else {
+      // A terminator counts only once more text has followed it: one at the very end
+      // of the stream can still grow ("درسته" -> "درسته؟ اونا").
+      const oe = ends(tl.out).filter((i) => tl.out.slice(i).trim().length > 0);
+      if (!oe.length) return;
+      const cutOut = oe[oe.length - 1];
+      const se = ends(tl.src);
+      const n = oe.length;
+      const cutSrc = se.length >= n ? se[n - 1] : tl.src.length;
+      send(tl.src.slice(0, cutSrc), tl.out.slice(0, cutOut));
+      tl.src = tl.src.slice(cutSrc); tl.out = tl.out.slice(cutOut);
+    }
+    this.on.draft(tl.src.replace(/\s+/g, " ").trim());
+    this.on.interim(tl.out.replace(/\s+/g, " ").trim());
+  }
+
   _startGemini() {
     this.gasr = new GeminiLiveAsr({
       relay: this.cfg.asrRelay,
@@ -1321,6 +1404,11 @@ export class LiveEngine {
     // without this a last part-sentence would sit unsent until Stop. Waiting
     // for `!_gInterim` avoids cutting a sentence the server is still forming;
     // MAX_UNIT_WAIT_MS is the backstop for a speaker who never pauses.
+    if (this.translateMode && this._tl) {
+      // A pause long enough that both streams have caught up: show what is left of
+      // both as one line, which also re-aligns source and translation.
+      if ((this._tl.src.trim() || this._tl.out.trim()) && Date.now() - this._tl.at > TL_RESYNC_MS) this._tlEmit(true);
+    }
     if (this.useGemini) {
       if (this.sentence.trim()) {
         const idle = Date.now() - this.lastVoiceAt;
@@ -1818,6 +1906,7 @@ Reply with JSON only: {"t":"..."}`;
 
   /** Finish the current sentence and wait for the queue to drain. */
   async drain() {
+    if (this._tl) this._tlEmit(true);
     this._flushSentence();
     await this.translateQueue;
     // The recorder's last slice lands after stop(); without this the download

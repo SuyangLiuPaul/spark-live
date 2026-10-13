@@ -35,6 +35,12 @@
 const WS_BASE = "wss://generativelanguage.googleapis.com/ws/"
   + "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const MODEL = "models/gemini-3.5-transcribe-live";
+// One model that listens AND translates as the speaker talks. Measured through the
+// relay on 2026-10-13 against a noisy 97 s talk: near-perfect transcript, no repeats
+// or fragments, translation ~0.4 s behind the speech, Cantonese kept as Cantonese.
+// It only takes targetLanguageCode "fa" for Persian — "fa-AF" and "prs" are refused
+// with 1007 — so its output is Iranian Persian, not Dari.
+const TRANSLATE_MODEL = "models/gemini-3.5-live-translate-preview";
 
 /** SOURCE_LANGS ids → the BCP-47 tags the Live API expects. */
 const BCP47 = {
@@ -108,6 +114,12 @@ export class GeminiLiveAsr {
    * @param {string} o.glossary  becomes customVocabulary — the ASR is biased
    *                             toward these BEFORE mishearing them, unlike the
    *                             text glossary which only matches once correct
+   * @param {string} o.translateTo  set (e.g. "fa") to run the Live TRANSLATE model
+   *                             instead: the source then arrives piece by piece via
+   *                             onHeard and the translation via onTranslation, and
+   *                             onInterim/onFinal are not used
+   * @param {(t:string)=>void} o.onHeard        translate mode: next piece of source
+   * @param {(t:string)=>void} o.onTranslation  translate mode: next piece of translation
    * @param {(t:string)=>void} o.onInterim
    * @param {(t:string)=>void} o.onFinal
    * @param {(e:Error)=>void}  o.onError
@@ -149,6 +161,25 @@ export class GeminiLiveAsr {
   }
 
   _setup() {
+    if (this.o.translateTo) {
+      // Field placement is not what the docs summary suggests: the two transcription
+      // switches sit at the SETUP level (inside generationConfig they are rejected,
+      // 1007 "Unknown name"); translationConfig sits inside generationConfig. The
+      // model answers with AUDIO whatever is asked for, so ask for it honestly; the
+      // engine simply ignores the audio parts.
+      return {
+        setup: {
+          model: TRANSLATE_MODEL,
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            translationConfig: { targetLanguageCode: this.o.translateTo, echoTargetLanguage: false },
+          },
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          sessionResumption: this.handle ? { handle: this.handle } : {},
+        },
+      };
+    }
     const lang = BCP47[this.o.language] || "";
     const vocab = vocabFrom(this.o.glossary);
     return {
@@ -232,6 +263,17 @@ export class GeminiLiveAsr {
       }
       const sc = m.serverContent;
       if (!sc) return;
+      if (this.o.translateTo) {
+        // Both sides arrive as running pieces, not interim-then-final: append them.
+        if (sc.inputTranscription && sc.inputTranscription.text) {
+          this.finals++;
+          this.o.onHeard && this.o.onHeard(sc.inputTranscription.text);
+        }
+        if (sc.outputTranscription && sc.outputTranscription.text) {
+          this.o.onTranslation && this.o.onTranslation(sc.outputTranscription.text);
+        }
+        return;
+      }
       if (sc.interimInputTranscription && sc.interimInputTranscription.text != null) {
         this.o.onInterim && this.o.onInterim(tidy(sc.interimInputTranscription.text));
       }

@@ -123,11 +123,14 @@ function syncAsrOption() {
   // Two ways to be usable. The relay is the one that makes a zero-setup site
   // possible: the key lives in the Worker, so nobody types anything here.
   const usable = !!ASR_RELAY || !!$("geminiKey").value.trim();
-  const opt = sel.querySelector('option[value="gemini"]');
-  if (opt) opt.disabled = !usable;
-  if (!usable && sel.value === "gemini") { sel.value = "whisper"; LS.set("asrEngine", "whisper"); }
+  for (const v of ["gemini", "translate"]) {
+    const opt = sel.querySelector(`option[value="${v}"]`);
+    if (opt) opt.disabled = !usable;
+  }
+  if (!usable && sel.value !== "whisper") { sel.value = "whisper"; LS.set("asrEngine", "whisper"); }
   const hint = $("asrHint");
-  if (hint) hint.textContent = ASR_RELAY ? t("asrHintRelay")
+  if (hint) hint.textContent = sel.value === "translate" && usable ? t("asrHintTranslate")
+                             : ASR_RELAY ? t("asrHintRelay")
                              : usable ? t("asrHintReady") : t("asrHintNeedKey");
   // The source-language advice depends on the engine too. Measured 2026-08-31
   // on the same Cantonese: auto-detect through Gemini kept 12 Cantonese-only
@@ -135,11 +138,19 @@ function syncAsrOption() {
   // Mandarin the way Whisper does. Telling presenters otherwise would push them
   // to change a setting that is already right.
   const srcHint = $("srcLangHint");
-  if (srcHint) srcHint.textContent = sel.value === "gemini" ? t("srcLangHint")
+  if (srcHint) srcHint.textContent = sel.value !== "whisper" ? t("srcLangHint")
                                                             : t("srcLangHintWhisper");
 }
 $("geminiKey").addEventListener("input", syncAsrOption);
 $("asrEngine").addEventListener("change", syncAsrOption);
+// The engine decides the room's language in translate mode, so the picker, the
+// operator's preview and the published document follow a change. This runs only on
+// a user's change, never during page load: syncAsrOption() is first called before
+// `targets` and `engine` exist, and touching a `let` that early throws.
+$("asrEngine").addEventListener("change", () => {
+  renderLangPick(); renderPreviewLang(); renderLines();
+  if (!engine) announceIdle();
+});
 syncAsrOption();
 
 /** True when the site carries a server-side key pool (hosted, no key entry). */
@@ -215,7 +226,7 @@ readiness();
    with our token before anyone else can take it. */
 function announceIdle() {
   doc.title = $("title").value.trim() || "Spark Live";
-  doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
+  doc.langs = langsOf(liveTargets());
   renderDlLangs();
   doc.live = false;
   doc.ended = false;
@@ -336,11 +347,20 @@ let targets = (() => {
   LS.set("targets", JSON.stringify(DEFAULT_TARGETS));
   return DEFAULT_TARGETS.slice();
 })();
+/* Live Translate produces ONE language, Persian, and not Dari ("fa-AF" and "prs"
+   are refused by the model). While it is the engine, that is the language the room
+   gets, whatever is ticked below; the ticks are kept for when Whisper or Transcribe
+   Live is chosen again. */
+const isTranslate = () => $("asrEngine") && $("asrEngine").value === "translate";
+const liveTargets = () => (isTranslate() ? ["fa"] : targets);
+const langsOf = (list) => list.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
+
 function renderLangPick() {
   $("langpick").innerHTML = Object.entries(LANGS)
     .map(([c, d]) => `<button data-c="${c}" class="${targets.includes(c) ? "on" : ""}">${d.label}</button>`).join("");
   for (const b of $("langpick").querySelectorAll("button")) {
     b.onclick = () => {
+      if (isTranslate()) { $("langHint").textContent = t("translateFixed"); return; }
       const c = b.dataset.c;
       if (targets.includes(c)) targets = targets.filter((x) => x !== c);
       else if (targets.length < 3) targets.push(c);
@@ -361,7 +381,8 @@ function renderLangPick() {
   }
   syncLangScrollHint();
   const names = targets.map((c) => LANGS[c].en).join(" · ");
-  $("langHint").textContent = targets.length >= 3 ? t("langWarn", names) : t("langNote", names);
+  $("langHint").textContent = isTranslate() ? t("translateFixed")
+    : targets.length >= 3 ? t("langWarn", names) : t("langNote", names);
 }
 /* Only fade the bottom edge when the list actually scrolls — a short list
    would otherwise have its last row faded for no reason. Re-checked on resize
@@ -422,14 +443,15 @@ renderLangPick();
 /* Which target language the OPERATOR sees in their own console. */
 let previewLang = LS.get("previewLang") || "";
 function activePreview() {
-  return targets.includes(previewLang) ? previewLang : targets[0];
+  const list = liveTargets();
+  return list.includes(previewLang) ? previewLang : list[0];
 }
 function renderPreviewLang() {
   const el = $("previewLang");
   if (!el) return;
   const cur = activePreview();
-  el.style.display = targets.length > 1 ? "" : "none";
-  el.innerHTML = targets.map((c) =>
+  el.style.display = liveTargets().length > 1 ? "" : "none";
+  el.innerHTML = liveTargets().map((c) =>
     `<button class="iconbtn lang ${c === cur ? "on" : ""}" data-c="${c}"${LANGS[c].rtl ? ' lang="prs"' : ""}>${LANGS[c].label}</button>`).join("");
   for (const b of el.querySelectorAll(".lang")) b.onclick = () => {
     previewLang = b.dataset.c; LS.set("previewLang", previewLang);
@@ -642,14 +664,17 @@ async function beginCapture({ resume = false } = {}) {
   });
 
   engine = new LiveEngine({
-    groqKey: groqKeys[0], groqKeys, proxy: useProxy, deviceId: micId, llmChain, targets,
+    groqKey: groqKeys[0], groqKeys, proxy: useProxy, deviceId: micId, llmChain,
+    // In Live Translate mode this is ["fa"]: the session itself translates into it,
+    // and if it fails the Whisper fallback translates into the SAME language.
+    targets: liveTargets().slice(), translateTo: "fa",
     // Streaming ASR when there is a way to reach Gemini at all — either the
     // relay (key server-side, nothing typed here) or this browser's own key.
     // The engine falls back to Whisper on its own if the socket is ever
     // rejected, so a bad key or a dead relay degrades the transcript rather
     // than ending the service.
-    asr: $("asrEngine").value === "gemini" && (ASR_RELAY || $("geminiKey").value.trim())
-      ? "gemini" : "whisper",
+    asr: ["gemini", "translate"].includes($("asrEngine").value) && (ASR_RELAY || $("geminiKey").value.trim())
+      ? $("asrEngine").value : "whisper",
     asrRelay: ASR_RELAY,
     geminiKey: $("geminiKey").value.trim(),
     language: $("lang").value,
@@ -772,7 +797,7 @@ async function beginCapture({ resume = false } = {}) {
   renderMics();
 
   doc.title = $("title").value.trim() || "Spark Live";
-  doc.langs = targets.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
+  doc.langs = langsOf(liveTargets());
   renderDlLangs();
   doc.live = true; doc.ended = false;
   // Resuming keeps the original start time: the service did not restart just

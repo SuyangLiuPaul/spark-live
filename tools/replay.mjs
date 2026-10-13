@@ -34,6 +34,7 @@ const ASR = flag("asr", "gemini");
 const LANG = flag("lang", "auto");
 const SPEED = Number(flag("speed", "1"));
 const RELAY = flag("relay", "wss://spark-live-asr.lsy95112.workers.dev/asr");
+const TARGET = ASR === "translate" ? "fa" : "prs";
 
 /* ── the little of a browser the engine touches ── */
 globalThis.window = { SPARK_LIVE_CONFIG: { proxy: true } };
@@ -65,16 +66,17 @@ const done = new Map();         // id -> when its translation landed
 let finals = 0;
 
 const eng = new LiveEngine({
-  proxy: true, targets: ["prs"], language: LANG, llmChain: [{ id: "proxy" }],
+  proxy: true, targets: [TARGET], language: LANG, llmChain: [{ id: "proxy" }],
   asr: ASR, asrRelay: RELAY, glossary: "", context: "",
 }).events({
   line: (l) => {
     const t = at();
     if (!first.has(l.id)) first.set(l.id, t);
     if (!l.pending) done.set(l.id, t);
-    log.push({ t, id: l.id, pending: !!l.pending, failed: !!l.failed, src: l.src, tr: (l.tr && l.tr.prs) || "" });
+    log.push({ t, id: l.id, pending: !!l.pending, failed: !!l.failed, src: l.src, tr: (l.tr && l.tr[TARGET]) || "" });
     const tag = l.pending ? "…   " : l.failed ? "FAIL" : "done";
     console.log(`${t.toFixed(1).padStart(6)}s  #${String(l.id).padEnd(3)} ${tag}  ${String(l.src).slice(0, 78)}`);
+    if (flag("show-tr", "") && !l.pending && l.tr && l.tr[TARGET]) console.log(`                    ${TARGET}: ${String(l.tr[TARGET]).slice(0, 90)}`);
   },
   error: (e) => { errors.push({ t: at(), m: String(e && e.message || e) }); console.log(`${at().toFixed(1).padStart(6)}s  ERROR ${String(e && e.message || e).slice(0, 110)}`); },
   draft: () => {}, interim: () => {}, level: () => {},
@@ -91,6 +93,7 @@ if (flag("debug", "") && ASR === "gemini") {
   eng._dropHarvested = (t) => { const e = eng._gUttEmitted; const r = dh(t); console.log(`${at().toFixed(1).padStart(6)}s  FINAL    "${String(t).slice(0, 110)}"\n                   emitted(${(e.match(/\S+/g)||[]).length}w) "${e.slice(-60)}"  ->  kept "${r.slice(0, 80)}"`); return r; };
 }
 if (ASR === "gemini") { eng.useGemini = true; eng._startGemini(); }
+if (ASR === "translate") { eng.translateMode = true; eng.useGemini = true; eng._startTranslate(); }
 
 console.log(`replaying ${seconds.toFixed(1)}s of ${path.basename(file)} via ${ASR}${ASR === "gemini" ? " relay" : ""} at ${SPEED}x\n`);
 const FRAME = 320;              // 20 ms

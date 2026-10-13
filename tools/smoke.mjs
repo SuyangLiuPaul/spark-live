@@ -520,6 +520,37 @@ await section("the engine keeps its promises to the room", async () => {
   }
 });
 
+/* ═══ 7f. Live Translate: source and translation stay paired ═══
+   In translate mode one session streams BOTH what was heard and its Persian, in
+   pieces, ~0.4 s apart. Lines are cut when the translation finishes sentences, and
+   take as many sentences from the source; a pause flushes both, re-aligning them.
+   Offline: the two streams are fed by hand. */
+await section("live translate pairs each line with its own translation", async () => {
+  const { LiveEngine } = await import(path.join(ROOT, "public/engine.js"));
+  const lines = [];
+  const e = new LiveEngine({ proxy: true, targets: ["fa"], translateTo: "fa", llmChain: [{ id: "proxy" }] })
+    .events({ line: (l) => lines.push(l), error() {}, draft() {}, interim() {}, status() {}, level() {} });
+  e.running = true; e.translateMode = true; e.useGemini = true;
+  e._tl = { src: "", out: "", at: Date.now() };
+  const hear = (x) => { e._tl.src += x; e._tl.at = Date.now(); };
+  const say = (x) => { e._tl.out += x; e._tl.at = Date.now(); e._tlEmit(false); };
+
+  hear("So what is the lesson? The lesson is that"); say("پس درس چیه؟");
+  check("a sentence ending at the very end of the stream is held (it may still grow)", lines.length === 0);
+  say(" درس اینه که");
+  check("once more text follows it, the line goes out", lines.length === 1, String(lines.length));
+  check("with its own source sentence, not the next one", lines[0] && lines[0].src === "So what is the lesson?", lines[0] && lines[0].src);
+  check("and the Persian question mark counts as an end", lines[0] && lines[0].tr.fa === "پس درس چیه؟", lines[0] && lines[0].tr.fa);
+  check("lines are final at once — nothing waits on another model", lines[0] && lines[0].pending === false);
+
+  hear(" we are not our circumstances. We are his glory, right?"); say(" ما شرایطمون نیستیم. ما جلال او هستیم، درسته؟");
+  e._tl.at = Date.now() - 5000; e._maybeTick();
+  const last = lines[lines.length - 1];
+  check("a pause sends what is left of both, together", e._tl.src === "" && e._tl.out === "" && /circumstances/.test(lines.map((l) => l.src).join(" ")));
+  check("nothing heard is lost on the way", /We are his glory, right\?/.test(lines.map((l) => l.src).join(" ")), last && last.src);
+  check("every line carries the room's language only", lines.every((l) => Object.keys(l.tr).join() === "fa"));
+});
+
 /* ═══ 8. the relay survives a presenter reload ═══
    A reload republished v=1 over a stored v=40 (freezing every phone), and
    published an empty idle document (blanking every phone). Both are asserted,
