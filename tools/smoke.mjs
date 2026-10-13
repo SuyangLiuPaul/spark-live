@@ -390,6 +390,136 @@ await section("a service keeps one key, services spread", async () => {
   }
 });
 
+/* ═══ 7e. the engine's own guarantees — offline, no quota ═══
+   Everything here was a complaint after the 2026-10-11 service, found again in
+   tools/replay.mjs on a noisy recording, and fixed in engine.js:
+     - the same sentences shown twice
+     - half a sentence translated on its own
+     - translations arriving late, then in the wrong order
+     - a corrector that "fixes" a sentence into a different one
+     - `proxy: upstream 429`, whichever limit it was
+   They drive the SHIPPED engine with a stand-in for the translation proxy. */
+await section("the engine keeps its promises to the room", async () => {
+  const eng = await import(path.join(ROOT, "public/engine.js"));
+  const outer = globalThis.fetch;
+  const norm = (x) => x.toLowerCase().replace(/[^a-z0-9 ]/g, "").split(/\s+/).filter(Boolean);
+
+  // ── repeat suppression on the cases measured from a real replay ──
+  const hist = norm("okay us pray thank you for this day we pray for our families");
+  check("a final that restates what was sent is cut off where the repeat ends",
+        eng.repeatedPrefix(norm("okay let us pray father thank you for this day thank you for our families thank you for"), hist) === 15);
+  check("new words right after a repeat are kept",
+        eng.repeatedPrefix(norm("us pray thank you for this day we pray for our families and more"), hist) === 12);
+  check("genuinely new sentences are never eaten",
+        eng.repeatedPrefix(norm("we will sing now hymn number four"), hist) === 0
+        && eng.repeatedPrefix(norm("thank you for the food tonight"), hist) === 0);
+  check("a corrector that rewrites the meaning is caught",
+        eng.deviates("Something like that.", "That thing I love.") && !eng.deviates(
+          "Thank you for teachers and for the students.", "Thank you for the teachers and for the students."));
+
+  const make = (chain) => {
+    const lines = [], errors = [];
+    const e = new eng.LiveEngine({ proxy: true, targets: ["prs"], language: "en", llmChain: chain || [{ id: "proxy" }] })
+      .events({ line: (l) => lines.push({ ...l, at: Date.now() }), error: (x) => errors.push(x), draft() {}, interim() {}, status() {}, level() {} });
+    e.running = true; e.lastVoiceAt = e.lastAudioAt = Date.now();
+    return { e, lines, errors };
+  };
+  const reply = (body, status = 200, extra = {}) => ({ ok: status < 400, status, json: async () => body, ...extra });
+  const chatCalls = [];
+  const stub = (fn) => { globalThis.fetch = async (u, init) => {
+    if (!String(u).includes("/api/chat")) return outer(u, init);
+    const b = JSON.parse(init.body); chatCalls.push(b);
+    return fn(b); }; };
+
+  try {
+    // ── the sender repeats nothing it already sent (final restating + a stray tail) ──
+    {
+      const { e } = make();
+      stub(() => reply({ content: JSON.stringify({ corrected: "x", tr: { prs: "y" } }) }));
+      e._sentNorm = norm("you must study because i could not"); e._lastSendAt = Date.now();
+      check("a one-word leftover that is the end of the last line is dropped", e._dropRepeated("not.") === "");
+      check("a different leftover is kept", e._dropRepeated("never.") === "never.");
+      e._lastSendAt = Date.now() - 20000;
+      check("…but not a minute later, when the speaker may simply say it again", e._dropRepeated("not.") === "not.");
+    }
+
+    // ── translated side by side, SHOWN in spoken order ──
+    {
+      const { e, lines } = make();
+      stub(async (b) => {
+        const slow = /FIRST/.test(b.prompt);
+        await new Promise((r) => setTimeout(r, slow ? 700 : 50));
+        const src = (b.prompt.match(/SOURCE TEXT[^\n]*\n(.*)$/s) || [])[1] || "";
+        return reply({ content: JSON.stringify({ corrected: src.trim(), tr: { prs: "tr:" + src.trim() } }) });
+      });
+      const t0 = Date.now();
+      e._send("FIRST sentence is slow to translate."); e._send("Second is quick."); e._send("Third is quick too.");
+      await e.translateQueue;
+      const done = lines.filter((l) => !l.pending);
+      check("all three arrive", done.length === 3, `${done.length}`);
+      check("in the order they were spoken", done.map((l) => l.id).join() === "1,2,3", done.map((l) => l.id).join());
+      check("without waiting one after another", Date.now() - t0 < 1500, `${Date.now() - t0} ms`);
+      check("a quick line is held back rather than shown ahead of a slow one",
+            done[1].at >= done[0].at && done[2].at >= done[1].at);
+    }
+
+    // ── a daily limit changes model at once; a per-minute limit waits as long as Groq says ──
+    {
+      chatCalls.length = 0;
+      const { e, lines } = make([{ id: "proxy" }, { id: "proxy", model: "groq/compound-mini" }]);
+      stub((b) => b.model === "openai/gpt-oss-120b"
+        ? reply({ error: "upstream", status: 429, detail: JSON.stringify({ error: { message: "Rate limit reached for model `openai/gpt-oss-120b` on tokens per day (TPD): Limit 200000, Used 199900. Please try again in 14m23s." } }) }, 429)
+        : reply({ content: JSON.stringify({ corrected: "Good morning everyone.", tr: { prs: "صبح بخیر" } }) }));
+      e._send("Good morning everyone.");
+      await e.translateQueue;
+      const gpt = chatCalls.filter((c) => c.model === "openai/gpt-oss-120b").length;
+      check("a spent daily allowance is tried once, not three times", gpt === 1, `${gpt} calls`);
+      check("and the sentence still arrives, from the other model", lines.some((l) => !l.pending && !l.failed && l.tr.prs));
+    }
+    {
+      chatCalls.length = 0; let n = 0;
+      const { e, lines } = make();
+      stub(() => ++n === 1
+        ? reply({ error: "upstream", status: 429, detail: JSON.stringify({ error: { message: "Rate limit reached on tokens per minute (TPM): Limit 8000, Used 7900. Please try again in 0.3s." } }) }, 429)
+        : reply({ content: JSON.stringify({ corrected: "Peace be with you.", tr: { prs: "سلام" } }) }));
+      const t0 = Date.now(); e._send("Peace be with you."); await e.translateQueue;
+      check("a per-minute limit is waited out and the sentence arrives", lines.some((l) => !l.pending && !l.failed && l.tr.prs), `${n} calls`);
+      check("for about as long as Groq asked", Date.now() - t0 < 2500, `${Date.now() - t0} ms`);
+    }
+
+    // ── a corrector that invents is asked again with corrections forbidden ──
+    {
+      chatCalls.length = 0;
+      const { e, lines } = make();
+      stub((b) => /DO NOT CORRECT/.test(b.sys)
+        ? reply({ content: JSON.stringify({ corrected: "Something like that.", tr: { prs: "چیزی شبیه آن" } }) })
+        : reply({ content: JSON.stringify({ corrected: "That thing I love.", tr: { prs: "آن چیزی که دوست دارم" } }) }));
+      e._send("Something like that.");
+      await e.translateQueue;
+      const out = lines.filter((l) => !l.pending).pop();
+      check("what the room reads is what was heard, not what was invented", out && out.src === "Something like that.", out && out.src);
+      check("and its translation is the faithful one", out && out.tr.prs === "چیزی شبیه آن");
+    }
+
+    // ── a pause does not send half a thought ──
+    {
+      const { e, lines } = make();
+      stub(() => reply({ content: JSON.stringify({ corrected: "x", tr: { prs: "y" } }) }));
+      e.useGemini = true; e.busy = false; e.sentence = "The lesson is that"; e.pendingSince = Date.now();
+      e.lastVoiceAt = Date.now() - 1000; e._maybeTick();
+      check("1 s of quiet after an unfinished fragment sends nothing", lines.length === 0);
+      e.lastVoiceAt = Date.now() - 2600; e._maybeTick();
+      check("a speaker who has clearly stopped gets the fragment sent", lines.length === 1);
+      const f = make(); stub(() => reply({ content: "{}" }));
+      f.e.useGemini = true; f.e.sentence = "We carry something bigger than us"; f.e.pendingSince = Date.now(); f.e.lastVoiceAt = Date.now() - 1000;
+      f.e._maybeTick();
+      check("a real chunk is sent on a normal pause", f.lines.length === 1);
+    }
+  } finally {
+    globalThis.fetch = outer;
+  }
+});
+
 /* ═══ 8. the relay survives a presenter reload ═══
    A reload republished v=1 over a stored v=40 (freezing every phone), and
    published an empty idle document (blanking every phone). Both are asserted,

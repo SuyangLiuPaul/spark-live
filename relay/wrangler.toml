@@ -10,7 +10,7 @@ compatibility_date = "2026-08-17"
 # Which sites may open a relay socket. Not secret, so it lives here rather than
 # in the secret store. Leave it out and any origin is accepted.
 [vars]
-ALLOWED_ORIGINS = "https://spark-live-translate.netlify.app,https://spark-live-dev.netlify.app"
+ALLOWED_ORIGINS = "https://spark-live-translate.netlify.app,https://spark-live-dev.netlify.app,https://sparklive.yahwehword.com"
 
 [observability]
 enabled = true

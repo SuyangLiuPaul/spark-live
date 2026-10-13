@@ -89,6 +89,17 @@ const wordsOf = (s) => String(s || "").trim().split(/\s+/).filter(Boolean);
 // a word stripped of exactly the case and punctuation the ASR keeps changing.
 
 const HARVEST_TAIL_CHARS = 3;
+// A pause is not the end of a thought. Flushing every 0.7 s of quiet turned "The
+// lesson is that" and "not." into lines of their own, each translated with no
+// context — which is how a Dari reader got half a sentence. A pause now sends the
+// unfinished tail only once it is a real chunk, or the speaker has clearly stopped.
+const FRAGMENT_MIN_WORDS = 6;
+const FRAGMENT_PATIENCE_MS = 2200;
+// Translations run side by side (the serial queue made every line wait for every
+// line before it, so a burst of short sentences ran to six seconds), but are shown in
+// the order they were SPOKEN, and nothing waits on a stuck call forever.
+const TRANSLATE_PARALLEL = 3;
+const JOB_TIMEOUT_MS = 20000;
 // Streaming ASR: how long the server may stay silent WHILE SPEECH IS ARRIVING
 // before the socket is cycled. Interims normally come several times a second
 // during speech, so 20 s of nothing is a dead session, not a pause.
@@ -510,6 +521,70 @@ function encodeWav(samples, rate = 16000) {
 
 const normWord = (w) => String(w || "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 
+/* ── repeat suppression ───────────────────────────────────────────────────
+ *
+ * The streaming ASR restates a whole utterance in its FINAL, and the sentences it
+ * already showed from the interims must not be shown again. Doing that by word
+ * COUNT (_dropHarvested) is fragile: a rewritten word, a final that arrives late for
+ * an older utterance, or one that begins before the point we started counting from,
+ * all move the boundary, and then the audience reads the same sentences twice —
+ * measured on 2026-10-13 replaying a noisy 97 s talk: "Okay. Let us pray. Father,
+ * thank you for this day…" came out a second time, five lines at once.
+ *
+ * So there is a second, content-based net: whatever the START of the candidate text
+ * says is already the END of what was sent, give or take a rewritten word, is a
+ * repeat. It is only ever asked about text that came from a final restating an
+ * utterance, never about the speaker simply saying the same thing again.
+ */
+function lcsLen(a, b) {
+  if (!a.length || !b.length) return 0;
+  let prev = new Array(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [0];
+    for (let j = 1; j <= b.length; j++) cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/**
+ * How many leading words of `cand` merely repeat the tail of `hist` (both lists of
+ * normalised words; `candNorm` parallel to the raw words). 0 = nothing repeated.
+ * The repeated stretch has to END where the history ends — a restatement is
+ * contiguous with what we sent — which is what stops it eating genuinely new
+ * words that merely resemble the old ones.
+ */
+export function repeatedPrefix(candNorm, hist) {
+  const n = candNorm.length;
+  for (let j = Math.min(n, 40); j >= 3; j--) {
+    for (const L of [j, j - 1, j + 1, j - 2, j + 2, j + 3]) {
+      if (L < 3 || L > hist.length) continue;
+      const tail = hist.slice(-L);
+      const m = lcsLen(candNorm.slice(0, j), tail);
+      const ratio = m / Math.max(j, L);
+      const endsTogether = candNorm[j - 1] === tail[L - 1];
+      // A rewritten phrase inside the restatement ("we pray for our families" -> "thank you
+      // for our families") costs similarity, so a looser bar is allowed — but only when the
+      // stretch ENDS on the very word the history ends on and is long enough to mean something.
+      // The end anchor is mandatory, not a tie-breaker: without it a high similarity let one
+      // NEW word that follows the repeat ("…our families and more") be swallowed with it.
+      if (endsTogether && m >= 3 && (ratio >= 0.9 || (ratio >= 0.7 && m >= 5))) return j;
+    }
+  }
+  return 0;
+}
+
+/** True when a "corrected" sentence has wandered off its source instead of fixing it. */
+export function deviates(source, corrected) {
+  const A = String(source || "").split(/\s+/).map(normWord).filter(Boolean);
+  const B = String(corrected || "").split(/\s+/).map(normWord).filter(Boolean);
+  // Three words is enough to tell: "Something like that" -> "That thing I love" shares one.
+  if (A.length < 3) return false;
+  const sim = lcsLen(A, B) / Math.max(A.length, B.length);
+  const ratio = B.length / A.length;
+  return sim < 0.6 || ratio > 1.7 || ratio < 0.5;
+}
+
 /**
  * LocalAgreement: commit only the leading words that two consecutive
  * hypotheses agree on. Timestamps let us trim exactly the committed audio.
@@ -564,15 +639,29 @@ async function proxyFetch(url, init) {
   if (!res.ok) {
     let msg = `${res.status}`;
     let upstream = 0;
+    let detail = "";
     try {
       const j = await res.json();
       upstream = Number(j.status) || 0;
+      detail = String(j.detail || "");
       msg = j.error === "not_configured" ? "server has no key pool configured"
           : j.error === "bad_access_code" ? "access code rejected"
           : `${j.error || res.status}${j.status ? " " + j.status : ""}`;
     } catch {}
     const err = new Error(msg);
     err.status = res.status;
+    // The proxy has always passed Groq's own wording back, and this used to throw it
+    // away — so for weeks every 429 read "proxy: upstream 429" and nobody could say
+    // whether it was a burst (tokens per MINUTE: wait a few seconds) or the day's
+    // allowance (tokens/requests per DAY: waiting is pointless, switch model).
+    // Those need opposite responses, so keep the distinction.
+    if (detail) {
+      err.detail = detail;
+      if (/per day|\(TPD\)|\(RPD\)/i.test(detail)) err.limit = "day";
+      else if (/per minute|\(TPM\)|\(RPM\)/i.test(detail)) err.limit = "minute";
+      const w = detail.match(/try again in\s+(?:(\d+)m)?\s*([\d.]+)s/i);
+      if (w) err.retryMs = Math.round(((+w[1] || 0) * 60 + parseFloat(w[2])) * 1000);
+    }
     // A drained pool is not a bug, it's a budget, and it has its own message and
     // its own incident category. On the hosted path the 429 arrives WRAPPED —
     // the proxy answers `{error:"upstream", status:429}` — so testing only the
@@ -777,7 +866,7 @@ export const SOURCE_LANGS = {
   th:   { code: "th",  label: "ไทย / Thai",       prompt: "Thai" },
 };
 
-function buildSys(targets, sourceLang) {
+function buildSys(targets, sourceLang, { strict = false } = {}) {
   const list = targets.map((c) => `   - "${c}": ${(LANGS[c] || {}).note || c}`).join("\n");
   const src = SOURCE_LANGS[sourceLang];
   // Naming the spoken language is not decoration. Told only that the talk "may
@@ -796,13 +885,20 @@ to a different variety of the same language.
   return `You are a professional live interpreter working in real time.
 You receive raw speech-recognition output from a live talk.
 ${note}
-1. CORRECT the source: fix ASR errors ONLY (homophones, mis-heard proper nouns,
-   missing punctuation, word-boundary mistakes). Use GLOSSARY as ground truth.
-   NEVER add, remove, summarise or reorder content.
+1. ${strict
+  ? 'DO NOT CORRECT. Copy the SOURCE TEXT into "corrected" exactly as given.'
+  : `CORRECT the source: fix ASR errors ONLY (homophones, mis-heard proper nouns,
+   missing punctuation, word-boundary mistakes, words run together). Use GLOSSARY as
+   ground truth. NEVER add, remove, summarise or reorder content. If a word looks
+   wrong but you cannot tell what was meant, LEAVE IT as it is — an honest odd word
+   is better than a confident invented one. Never finish a sentence that was cut off.`}
 
 2. Translate the corrected text into each language below. Translate meaning, not
    word-for-word — natural and speakable, as a live interpreter would say it.
    Never leave words from another language untranslated inside a translation.
+   Translate ONLY the SOURCE TEXT. PRIOR CONTEXT is read-only background for names
+   and pronouns: never translate it, repeat it, or pull its content into this
+   sentence. A fragment stays a fragment.
 ${list}
 
 Reply with JSON only: {"corrected":"...","tr":{${targets.map((c) => `"${c}":"..."`).join(",")}}}`;
@@ -932,6 +1028,7 @@ const backoff = (n) => new Promise((r) => setTimeout(r, 400 * 2 ** n));
 
 async function askChain(chain, prompt, sys) {
   const errors = [];
+  let lastErr = null;
   for (const step of chain) {
     const def = LLM_PROVIDERS[step.id];
     if (!def || !(def.kind === "proxy" || step.key || (step.pool && step.pool.size))) continue;
@@ -954,14 +1051,30 @@ async function askChain(chain, prompt, sys) {
         break;
       } catch (e) {
         errors.push(`${step.id}: ${e.message}`);
+        lastErr = e;
         if (e && e.status === 429 && step.pool) { step.pool.bench(key, e.retryAfter); continue; }
-        if (e && e.exhausted && !step.pool && a < tries - 1) { await backoff(a); continue; }
+        // A daily limit does not lift in a few seconds: go to the next model now.
+        if (e && e.exhausted && !step.pool && e.limit === "day") break;
+        // A per-minute limit does: wait as long as Groq says (capped), not a guess.
+        if (e && e.exhausted && !step.pool && a < tries - 1) {
+          await (e.retryMs ? new Promise((r) => setTimeout(r, Math.min(e.retryMs + 150, 5000))) : backoff(a));
+          continue;
+        }
         if (isTransient(e) && a < tries - 1) { await backoff(a); continue; }
         break;
       }
     }
   }
-  throw new Error(errors.join(" · ") || "no_provider_configured");
+  // Say each distinct failure once, with how many times — "proxy: upstream 429 ·
+  // proxy: upstream 429 · proxy: upstream 429" is one problem, not three — and keep
+  // the flags the console decides what to tell the operator from: this used to be a
+  // fresh Error, so `exhausted` never survived and a rate limit was reported as a
+  // generic translation failure.
+  const counts = new Map();
+  for (const m of errors) counts.set(m, (counts.get(m) || 0) + 1);
+  const fail = new Error([...counts].map(([m, n]) => (n > 1 ? `${m} ×${n}` : m)).join(" · ") || "no_provider_configured");
+  if (lastErr) { fail.exhausted = !!lastErr.exhausted; fail.limit = lastErr.limit; fail.detail = lastErr.detail; fail.status = lastErr.status; }
+  throw fail;
 }
 
 function parseJson(raw) {
@@ -984,7 +1097,10 @@ function parseJson(raw) {
  */
 export function buildLlmChain({ useProxy = false, groqKeys = [], gemini = "", kimi = "", glm = "" } = {}) {
   return [
-    ...(useProxy ? [{ id: "proxy" }] : []),
+    // Two steps on the same proxy but different models: Groq meters each model
+    // separately, so when gpt-oss-120b is out (its allowance is the tight one) the
+    // sentence goes to compound-mini instead of being lost.
+    ...(useProxy ? [{ id: "proxy" }, { id: "proxy", model: "groq/compound-mini" }] : []),
     { id: "groq",   key: (groqKeys && groqKeys[0]) || "" },
     { id: "gemini", key: gemini },
     { id: "kimi",   key: kimi },
@@ -1024,7 +1140,11 @@ export class LiveEngine {
     this.busy = false;
     this.lastVoiceAt = 0;
     this.seq = 0;
-    this.translateQueue = Promise.resolve();
+    this.jobs = [];            // translations in flight or waiting, in spoken order
+    this._inflight = 0;
+    this._ctx = [];            // [{id, text}] recent sentences, for continuity
+    this._sentNorm = [];       // normalised words of what has been sent, newest last
+    this._lastSendAt = 0;
     this.pendingSince = 0;
     this._interimAt = 0; this._interimSrc = ""; this._interimBusy = false;
     this._gUttEmitted = "";   // text already taken out of the CURRENT utterance
@@ -1113,7 +1233,7 @@ export class LiveEngine {
         this.lastAsrAt = Date.now();
         // The final restates the ENTIRE utterance, including whatever the
         // interims already put on screen — commit only what is new.
-        const rest = this._dropHarvested(t);
+        const rest = this._dropRepeated(this._dropHarvested(t));
         this._gUttEmitted = "";
         if (rest) this._commit(rest);
         this.on.draft((this.sentence || "").trim());
@@ -1203,9 +1323,12 @@ export class LiveEngine {
     // MAX_UNIT_WAIT_MS is the backstop for a speaker who never pauses.
     if (this.useGemini) {
       if (this.sentence.trim()) {
-        const quiet = Date.now() - this.lastVoiceAt > SILENCE_FLUSH_MS;
+        const idle = Date.now() - this.lastVoiceAt;
         const stale = this.pendingSince && Date.now() - this.pendingSince > MAX_UNIT_WAIT_MS;
-        if ((quiet && !this._gInterim) || stale) this._flushSentence();
+        const tail = this.sentence.trim();
+        const chunky = wordsOf(tail).length >= FRAGMENT_MIN_WORDS || /[.!?。！？…]["'”’)\]]?$/.test(tail);
+        const ready = (idle > SILENCE_FLUSH_MS && chunky) || idle > FRAGMENT_PATIENCE_MS;
+        if ((ready && !this._gInterim) || stale) this._flushSentence();
       }
       // A session can stay OPEN and simply stop answering: measured at 1x on
       // 2026-09-05, the server went silent for 107 s while speech kept
@@ -1409,8 +1532,11 @@ export class LiveEngine {
       this.on.draft(tail);
       this._interim(tail);
 
-      const quiet = Date.now() - this.lastVoiceAt > SILENCE_FLUSH_MS;
-      if (quiet && this.sentence.trim()) this._flushSentence();
+      // Same rule as the streaming path: a pause sends a real chunk, not half a thought.
+      const idle = Date.now() - this.lastVoiceAt;
+      const tail2 = this.sentence.trim();
+      const chunky = wordsOf(tail2).length >= FRAGMENT_MIN_WORDS || /[.!?。！？…]["'”’)\]]?$/.test(tail2);
+      if (tail2 && ((idle > SILENCE_FLUSH_MS && chunky) || idle > FRAGMENT_PATIENCE_MS)) this._flushSentence();
     } finally {
       this.busy = false;
     }
@@ -1527,6 +1653,36 @@ Reply with JSON only: {"t":"..."}`;
     return fw.slice(cut).join(" ");
   }
 
+  /** Words that have gone out (or are about to), newest last, for repeat detection. */
+  _history() {
+    return [...this._sentNorm, ...wordsOf(this.sentence).map(normWord).filter(Boolean)];
+  }
+
+  /**
+   * Remove from text that came out of a FINAL whatever merely restates what was
+   * already sent. See repeatedPrefix for why this exists alongside _dropHarvested.
+   */
+  _dropRepeated(text) {
+    const raw = wordsOf(String(text || "").replace(/([.!?…])(?=[\p{L}\p{N}])/gu, "$1 "));
+    if (!raw.length) return "";
+    const norm = raw.map(normWord);
+    const keep = norm.map((w) => !!w);
+    const rawK = raw.filter((_, i) => keep[i]), normK = norm.filter(Boolean);
+    if (!normK.length) return raw.join(" ");
+    const hist = this._history().slice(-80);
+
+    // A leftover of one or two words that is exactly the end of what was just sent
+    // ("...because I could not." then "not.") is the same words arriving twice.
+    if (normK.length <= 2 && Date.now() - this._lastSendAt < 4000 && hist.length >= normK.length
+        && normK.every((w, i) => w === hist[hist.length - normK.length + i])) return "";
+
+    const cut = repeatedPrefix(normK, hist);
+    if (cut >= normK.length) return "";
+    // Wholly contained in the last stretch, even if not contiguous with its end.
+    if (normK.length >= 5 && lcsLen(normK, hist.slice(-60)) / normK.length >= 0.9) return "";
+    return rawK.slice(cut).join(" ");
+  }
+
   _commit(text) {
     const t = String(text || "").replace(/\s+/g, " ").replace(/\s+([,.!?;:，。！？；：])/g, "$1").trim();
     if (!t) return;
@@ -1580,31 +1736,84 @@ Reply with JSON only: {"t":"..."}`;
   _send(source) {
     this.on.interim(""); this._interimSrc = "";
     const id = ++this.seq;
+    // History for repeat detection, and context for the sentences that follow.
+    this._sentNorm.push(...wordsOf(source).map(normWord).filter(Boolean));
+    if (this._sentNorm.length > 120) this._sentNorm.splice(0, this._sentNorm.length - 120);
+    this._lastSendAt = Date.now();
+    this._ctx.push({ id, text: source });
+    if (this._ctx.length > 8) this._ctx.shift();
     this.on.line({ id, src: source, tr: {}, pending: true, t: Date.now() });
-    // Serial queue: translations land in the order they were spoken, and each
-    // one can see the previous sentences as context.
-    this.translateQueue = this.translateQueue.then(async () => {
-      try {
-        const prompt = buildPrompt({
-          text: source,
-          glossary: this.cfg.glossary,
-          context: this.cfg.context,
-          prior: this.prior.slice(-3).join("\n"),
-        });
-        const { raw, via } = await askChain(this.cfg.llmChain, prompt, buildSys(this.cfg.targets, this.cfg.language));
-        const out = parseJson(raw) || {};
-        const corrected = String(out.corrected || source).trim();
-        this.prior.push(corrected);
-        if (this.prior.length > 6) this.prior.shift();
-        const tr = {};
-        for (const c of this.cfg.targets) tr[c] = String((out.tr && out.tr[c]) || "").trim();
-        this.on.line({ id, src: corrected, tr, pending: false, via, t: Date.now() });
-      } catch (e) {
-        this.on.error(e);
+    this.jobs.push({ id, source, state: "wait", out: null });
+    this._pump();
+  }
+
+  /** Start waiting translations, up to the parallel limit. */
+  _pump() {
+    while (this._inflight < TRANSLATE_PARALLEL) {
+      const job = this.jobs.find((j) => j.state === "wait");
+      if (!job) break;
+      job.state = "run"; this._inflight++;
+      this._translate(job).then((out) => { job.out = out; })
+        .catch((e) => { job.out = { failed: true, error: e }; })
+        .finally(() => { job.state = "done"; this._inflight--; this._release(); this._pump(); });
+    }
+  }
+
+  /** Show finished translations strictly in the order they were spoken. */
+  _release() {
+    while (this.jobs.length && this.jobs[0].state === "done") {
+      const job = this.jobs.shift();
+      const o = job.out || { failed: true };
+      if (o.error) this.on.error(o.error);
+      if (o.failed) {
         // Never drop a line: show the uncorrected source rather than nothing.
-        this.on.line({ id, src: source, tr: {}, pending: false, failed: true, t: Date.now() });
+        this.on.line({ id: job.id, src: job.source, tr: {}, pending: false, failed: true, t: Date.now() });
+      } else {
+        this.on.line({ id: job.id, src: o.corrected, tr: o.tr, pending: false, via: o.via, ...(o.heard ? { heard: o.heard } : {}), t: Date.now() });
       }
-    });
+    }
+  }
+
+  async _translate(job) {
+    const { id, source } = job;
+    // Context is the sentences spoken just before this one — as corrected where that
+    // is already known, as heard where it is not yet (they are being translated now).
+    const prior = this._ctx.filter((c) => c.id < id).slice(-3).map((c) => c.text).join("\n");
+    const prompt = buildPrompt({ text: source, glossary: this.cfg.glossary, context: this.cfg.context, prior });
+    const guarded = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("translation timed out")), JOB_TIMEOUT_MS))]);
+
+    let { raw, via } = await guarded(askChain(this.cfg.llmChain, prompt, buildSys(this.cfg.targets, this.cfg.language)));
+    let out = parseJson(raw) || {};
+    let corrected = String(out.corrected || source).trim();
+    // The corrector is only allowed to FIX what was heard. When it hands back
+    // something that has wandered off — words added to complete a thought, meaning
+    // turned round — the translation built on it is a translation of something
+    // nobody said ("Something like that" became "That thing I love"). Ask again,
+    // forbidding any correction, so at worst the room reads a faithful translation
+    // of an imperfect transcript instead of a confident one of an invented sentence.
+    if (deviates(source, corrected)) {
+      try {
+        ({ raw, via } = await guarded(askChain(this.cfg.llmChain, prompt, buildSys(this.cfg.targets, this.cfg.language, { strict: true }))));
+        out = parseJson(raw) || {};
+      } catch { /* keep what we have below */ }
+      corrected = deviates(source, String(out.corrected || source)) ? source : String(out.corrected || source).trim();
+    }
+    const entry = this._ctx.find((c) => c.id === id);
+    if (entry) entry.text = corrected;
+    const tr = {};
+    for (const c of this.cfg.targets) tr[c] = String((out.tr && out.tr[c]) || "").trim();
+    // What the recogniser actually heard, kept ONLY when the corrector changed words
+    // (not mere case or punctuation). The operator can read the language being spoken
+    // and the audience cannot, so this is the one place a wrong "correction" can be
+    // caught by a person — and the Monday review needs it to find them.
+    const w = (x) => wordsOf(x).map(normWord).filter(Boolean).join(" ");
+    const heard = w(source) !== w(corrected) ? source : "";
+    return { corrected, tr, via, heard };
+  }
+
+  /** Resolves once every sentence handed to the translator has been shown. */
+  get translateQueue() {
+    return (async () => { while (this.jobs.length) await new Promise((r) => setTimeout(r, 80)); })();
   }
 
   /** Finish the current sentence and wait for the queue to drain. */

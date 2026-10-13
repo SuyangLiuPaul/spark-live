@@ -91,6 +91,8 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .line.failed{border-left-color:var(--bad)}
 .line .dari{font-size:20px;line-height:1.75}
 .line .src{font-size:12.5px;color:var(--dim);margin-top:3px}
+/* What the recogniser heard, shown only where the corrector changed words. */
+.line .heard{font-size:11.5px;color:var(--warn);opacity:.85;margin-top:2px}
 @keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
 .draft{color:var(--faint);font-style:italic;min-height:22px;font-size:14px;margin-top:8px}
@@ -116,6 +118,12 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .resumebar .sub{margin-top:2px}
 .resumebar > div:first-child{flex:1 1 220px}
 .resumebar button{flex:0 0 auto}
+/* `display:flex` above outranks the UA rule behind the `hidden` attribute, so this
+   banner — "Session interrupted… Press Resume" — never went away, even mid-service
+   with Stop showing. Reported 2026-10-11/13 as the console looking interrupted while
+   it was live. Every other hidden-toggled box here has its own [hidden] rule; this
+   one was missing it. */
+.resumebar[hidden]{display:none}
 .ui-rtl .resumebar{flex-direction:row-reverse}
 
 /* ── audience view ── */

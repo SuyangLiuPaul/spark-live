@@ -552,6 +552,7 @@ function renderLines() {
     return `<div class="line ${l.pending ? "pending" : ""} ${l.failed ? "failed" : ""}">
       <div class="dari ${rtl ? "rtl" : ""}">${esc(main) || (l.pending ? t("translating") : "—")}</div>
       <div class="src">${esc(l.src)}</div>
+      ${l.heard ? `<div class="heard">${esc(t("heardLabel"))} ${esc(l.heard)}</div>` : ""}
     </div>`;
   }).join("");
 }
@@ -679,8 +680,13 @@ async function beginCapture({ resume = false } = {}) {
         return;
       }
       if (e && e.exhausted) {
-        showErr(t("quotaOut")); toast(t("quotaOut"), "bad");
-        reporter.report("quota_exhausted", t("quotaOut"), msg);
+        // Two different things share one status code. A per-MINUTE limit lifts by
+        // itself in seconds: a few lines run late, say so calmly and do not page
+        // anybody. A per-DAY one does not, and that is the one worth an alert.
+        const day = e.limit === "day";
+        const note = day ? t("quotaOut") : t("quotaBusy");
+        showErr(note); toast(note, day ? "bad" : "ok");
+        if (day) reporter.report("quota_exhausted", t("quotaOut"), `${msg}${e.detail ? " — " + String(e.detail).slice(0, 200) : ""}`);
         return;
       }
       // Streaming ASR is out of credit. The service carries on — the engine has
@@ -951,6 +957,9 @@ function transcriptText(only) {
     }
     body.push(`[${stamp(Number(l.t) || started)}]${l.failed ? "   (not translated)" : ""}`);
     body.push(`   ${String(l.src || "").trim()}`);
+    // The recogniser's own words, where the corrector changed them — so a wrong
+    // "fix" can be found on Monday instead of being taken for what was said.
+    if (l.heard) body.push(`   (heard: ${String(l.heard).trim()})`);
     for (const lang of langs) {
       const txt = String((l.tr || {})[lang.c] || "").trim();
       if (txt) body.push(`   ${lang.label || lang.c}:  ${txt}`);

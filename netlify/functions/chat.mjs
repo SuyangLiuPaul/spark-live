@@ -29,10 +29,15 @@ export default async (req) => {
   if (!prompt) return json({ error: "missing_prompt" }, 400);
 
   const model = ALLOWED.has(String(body.model)) ? String(body.model) : DEFAULT_MODEL;
+  // gpt-oss thinks before it answers, and every thinking token counts against the
+  // key's per-minute AND per-day allowance — the same allowance the translations
+  // themselves need. For correct-and-translate of ONE sentence that thinking buys
+  // almost nothing, so keep it short. (Other models reject the field, hence the guard.)
   const payload = JSON.stringify({
     model,
     temperature: 0.15,
     max_tokens: 2048,
+    ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {}),
     response_format: { type: "json_object" },
     messages: [{ role: "system", content: sys }, { role: "user", content: prompt }],
   });
@@ -59,7 +64,9 @@ export default async (req) => {
   } catch (e) {
     return json({ error: "bad_upstream_json", detail: String(e.message || e).slice(0, 160) }, 502);
   }
-  return json({ content: data?.choices?.[0]?.message?.content || "" });
+  // `usage` is returned so a replay can total what a service actually costs; nothing in
+  // the page depends on it.
+  return json({ content: data?.choices?.[0]?.message?.content || "", usage: data?.usage || null });
 };
 
 export const config = { path: "/api/chat" };
