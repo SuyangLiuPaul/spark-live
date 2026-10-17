@@ -935,10 +935,11 @@ function buildPrompt({ text, glossary, context, prior }) {
 
 async function askGemini({ key, model, prompt, sys, signal }) {
   const chain = [...new Set([
-    (!model || model.startsWith("gemini-2.5")) ? "gemini-3.5-flash" : model,
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
+    (!model || model.startsWith("gemini-2.5")) ? "gemini-3.8-flash" : model,
     "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
   ])];
   let lastErr;
   for (const m of chain) {
@@ -999,7 +1000,7 @@ async function askOpenAICompat({ key, base, model, prompt, sys, signal }) {
  * Provider table. Measured on real sermon audio (2026-07-02, 25 s window):
  *   groq  openai/gpt-oss-120b   2.4 s  clean Dari                ← primary
  *   groq  llama-3.3-70b         1.0 s  BROKEN — leaks Chinese into the Dari
- *   gemini-3.5-flash            1.2 s  clean Dari (Free Tier)
+ *   gemini-3.8-flash            1.2 s  clean Dari (Free Tier)
  *   glm-5.2                    43.8 s  good quality, far too slow for live
  * Order = fast-and-good first, reliable-but-slow last.
  */
@@ -1009,7 +1010,7 @@ export const LLM_PROVIDERS = {
   // Same key, 70k TPM vs 8k — the escape hatch when a long service out-paces
   // gpt-oss-120b's token budget. Measured 3.2 s, Dari quality comparable.
   groqHi: { label: "Groq · compound-mini", kind: "openai", base: "https://api.groq.com/openai/v1", model: "groq/compound-mini" },
-  gemini: { label: "Gemini 3.5 Flash",    kind: "gemini", model: "gemini-3.5-flash" },
+  gemini: { label: "Gemini 3.8 Flash",    kind: "gemini", model: "gemini-3.8-flash" },
   kimi:   { label: "Kimi (Moonshot)",     kind: "openai", base: "https://api.moonshot.ai/v1", model: "kimi-latest" },
   glm:    { label: "GLM 5.2",             kind: "openai", base: "https://api.z.ai/api/coding/paas/v4", model: "glm-5.2" },
 };

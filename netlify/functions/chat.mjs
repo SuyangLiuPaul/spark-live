@@ -13,7 +13,7 @@ const DEFAULT_MODEL = "openai/gpt-oss-120b";
 const MAX_CHARS = 24000;
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
-const GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"];
+const GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash"];
 
 function geminiKeys() {
   return String(process.env.GEMINI_API_KEY || process.env.SPARK_GEMINI_API_KEY || "")
