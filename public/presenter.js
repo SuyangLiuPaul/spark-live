@@ -953,6 +953,35 @@ $("dlBtn").onclick = async () => {
  *    source text always stays, because a translation cannot be corrected
  *    without the line it came from.
  */
+function cleanExportLine(s) {
+  let out = String(s || "").trim();
+  for (let i = 0; i < 3; i++) {
+    out = out.replace(/([\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])\s+([\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af，。！？；：、“”‘’（）《》【】])/g, "$1$2");
+    out = out.replace(/([，。！？；：、“”‘’（）《》【】])\s+([\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])/g, "$1$2");
+  }
+  return out.replace(/[ \t]{2,}/g, " ").trim();
+}
+
+function joinIntoParagraphs(lines, isCjk) {
+  const paras = [];
+  let buf = [];
+  let charCount = 0;
+  for (const raw of lines) {
+    const s = cleanExportLine(raw);
+    if (!s) continue;
+    buf.push(s);
+    charCount += s.length;
+    const endsSentence = /[.!?。！？；]$/.test(s);
+    if ((buf.length >= 4 && endsSentence) || charCount >= (isCjk ? 180 : 320)) {
+      paras.push(buf.join(isCjk ? "" : " "));
+      buf = [];
+      charCount = 0;
+    }
+  }
+  if (buf.length) paras.push(buf.join(isCjk ? "" : " "));
+  return paras;
+}
+
 function transcriptText(only) {
   const langs = (Array.isArray(doc.langs) ? doc.langs : [])
     .filter((l) => !only || l.c === only);
@@ -962,37 +991,63 @@ function transcriptText(only) {
     const p2 = (n) => String(n).padStart(2, "0");
     return `${p2(Math.floor(sec / 3600))}:${p2(Math.floor(sec / 60) % 60)}:${p2(sec % 60)}`;
   };
-  const RULE = "-".repeat(62);
+  const MAJOR = "=".repeat(68);
+  const RULE = "-".repeat(68);
   const spoken = all.filter((l) => !l.mark);
   const head = [
+    MAJOR,
     doc.title || "Spark Live",
     `${new Date(started).toLocaleString()}   ·   ${spoken.length} lines`,
     langs.length ? `Source  ->  ${langs.map((l) => l.label || l.c).join(",  ")}`
                  : "Source only (no translation)",
-    RULE,
+    MAJOR,
     "",
   ];
-  const body = [];
+
+  // Part 1: Clean Continuous Paragraphs per language (ready for reading / pasting)
+  const summary = [];
+  const srcLines = spoken.map((l) => cleanExportLine(l.src)).filter(Boolean);
+  const srcIsCjk = /[\u4e00-\u9fff]/.test(srcLines.slice(0, 10).join(""));
+  if (srcLines.length) {
+    summary.push("【Part 1 · Continuous Transcript / 完整連貫文稿】", RULE, "");
+    summary.push("■ Source (原文):", "");
+    for (const p of joinIntoParagraphs(srcLines, srcIsCjk)) {
+      summary.push(`  ${p}`, "");
+    }
+    for (const lang of langs) {
+      const trLines = spoken.map((l) => cleanExportLine((l.tr || {})[lang.c])).filter(Boolean);
+      if (!trLines.length) continue;
+      const isCjk = /[\u4e00-\u9fff]/.test(trLines.slice(0, 10).join(""));
+      summary.push(`■ ${lang.label || lang.c}:`, "");
+      for (const p of joinIntoParagraphs(trLines, isCjk)) {
+        summary.push(`  ${p}`, "");
+      }
+    }
+    summary.push(MAJOR, "");
+  }
+
+  // Part 2: Timestamped Line-by-Line Log
+  const body = ["【Part 2 · Timestamped Line-by-Line Log / 時間軸逐句對照】", RULE, ""];
   for (const l of all) {
     if (l.mark) {
       // A gap is the one thing somebody editing the recording is hunting for,
       // so it gets the full width of the page rather than a quiet note.
-      body.push(RULE, `[${stamp(Number(l.t) || started)}]  *** ${String(l.src || "").trim()} ***`, RULE, "");
+      body.push(RULE, `[${stamp(Number(l.t) || started)}]  *** ${cleanExportLine(l.src)} ***`, RULE, "");
       continue;
     }
     body.push(`[${stamp(Number(l.t) || started)}]${l.failed ? "   (not translated)" : ""}`);
-    body.push(`   ${String(l.src || "").trim()}`);
+    body.push(`   ${cleanExportLine(l.src)}`);
     // The recogniser's own words, where the corrector changed them — so a wrong
     // "fix" can be found on Monday instead of being taken for what was said.
-    if (l.heard) body.push(`   (heard: ${String(l.heard).trim()})`);
+    if (l.heard) body.push(`   (heard: ${cleanExportLine(l.heard)})`);
     for (const lang of langs) {
-      const txt = String((l.tr || {})[lang.c] || "").trim();
+      const txt = cleanExportLine((l.tr || {})[lang.c]);
       if (txt) body.push(`   ${lang.label || lang.c}:  ${txt}`);
     }
     body.push("");
   }
   // BOM + CRLF: this file's job is to open correctly in Windows Notepad.
-  return "\uFEFF" + head.concat(body).join("\r\n") + "\r\n";
+  return "\uFEFF" + head.concat(summary, body).join("\r\n") + "\r\n";
 }
 
 function saveTranscript(only) {
@@ -1007,7 +1062,108 @@ function saveTranscript(only) {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
+function printTranscript(only) {
+  const spoken = all.filter((l) => !l.mark);
+  if (!spoken.length) { toast(t("noTranscript"), "bad"); return; }
+  const langs = (Array.isArray(doc.langs) ? doc.langs : [])
+    .filter((l) => !only || l.c === only);
+  const started = Number(doc.startedAt) || Date.now();
+  const stamp = (ms) => {
+    const sec = Math.max(0, Math.round((ms - started) / 1000));
+    const p2 = (n) => String(n).padStart(2, "0");
+    return `${p2(Math.floor(sec / 3600))}:${p2(Math.floor(sec / 60) % 60)}:${p2(sec % 60)}`;
+  };
+
+  const srcLines = spoken.map((l) => cleanExportLine(l.src)).filter(Boolean);
+  const srcIsCjk = /[\u4e00-\u9fff]/.test(srcLines.slice(0, 10).join(""));
+  let continuousHtml = "";
+  if (srcLines.length) {
+    continuousHtml += `<div class="sec"><div class="sec-h">Source · 原文連貫文稿</div>`;
+    for (const p of joinIntoParagraphs(srcLines, srcIsCjk)) {
+      continuousHtml += `<p class="para">${esc(p)}</p>`;
+    }
+    continuousHtml += `</div>`;
+    for (const lang of langs) {
+      const trLines = spoken.map((l) => cleanExportLine((l.tr || {})[lang.c])).filter(Boolean);
+      if (!trLines.length) continue;
+      const isCjk = /[\u4e00-\u9fff]/.test(trLines.slice(0, 10).join(""));
+      const dirAttr = lang.rtl ? ' dir="rtl" lang="prs"' : "";
+      continuousHtml += `<div class="sec"${dirAttr}><div class="sec-h">${esc(lang.label || lang.c)} · 連貫譯文</div>`;
+      for (const p of joinIntoParagraphs(trLines, isCjk)) {
+        continuousHtml += `<p class="para">${esc(p)}</p>`;
+      }
+      continuousHtml += `</div>`;
+    }
+  }
+
+  let logHtml = "";
+  for (const l of all) {
+    const ts = stamp(Number(l.t) || started);
+    if (l.mark) {
+      logHtml += `<div class="gap">[${esc(ts)}] — ${esc(cleanExportLine(l.src))}</div>`;
+      continue;
+    }
+    let trRows = "";
+    for (const lang of langs) {
+      const txt = cleanExportLine((l.tr || {})[lang.c]);
+      if (!txt) continue;
+      const dirAttr = lang.rtl ? ' dir="rtl" lang="prs"' : "";
+      trRows += `<div class="tr"${dirAttr}><span class="tr-lbl">${esc(lang.label || lang.c)}</span><span class="tr-txt">${esc(txt)}</span></div>`;
+    }
+    logHtml += `<div class="row">
+      <div class="ts">${esc(ts)}</div>
+      <div class="cnt">
+        <div class="src">${esc(cleanExportLine(l.src))}</div>
+        ${trRows}
+      </div>
+    </div>`;
+  }
+
+  const w = window.open("", "_blank");
+  if (!w) { toast("Popup blocked — please allow popups for PDF export", "bad"); return; }
+  const title = doc.title || "Spark Live Transcript";
+  const dateStr = new Date(started).toLocaleString();
+  const langSummary = langs.length ? langs.map((l) => l.label || l.c).join(" · ") : "Source only";
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
+<style>
+  @page { size: A4; margin: 18mm 18mm 20mm 18mm; }
+  body { font: 11pt/1.75 "Noto Serif TC", "Songti TC", "PingFang TC", Georgia, serif; color: #1f242d; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+  .cover { margin-bottom: 20px; }
+  .brand { font: 600 8.5pt/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #9a6b16; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 6px; }
+  h1 { font-size: 20pt; line-height: 1.3; margin: 0 0 6px; color: #141821; font-weight: 700; }
+  .meta { font: 9.5pt/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #68707c; }
+  .rule { height: 2px; background: #c59b27; margin: 14px 0 4px; }
+  .rule-thin { height: 1px; background: #e2e5ec; margin: 0 0 22px; }
+  h2.part { font: 700 12pt/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1e293b; border-bottom: 1.5px solid #cbd5e1; padding-bottom: 6px; margin: 26px 0 14px; }
+  .sec { margin: 14px 0 20px; }
+  .sec-h { font: 700 10.5pt/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #2b3548; background: #f3f5f8; border-left: 3.5px solid #c59b27; padding: 5px 10px; margin-bottom: 10px; }
+  p.para { margin: 0 0 10px; text-align: justify; }
+  .row { display: flex; gap: 12px; padding: 7px 0; border-bottom: 1px solid #f1f5f9; page-break-inside: avoid; }
+  .ts { font: 600 8.5pt/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color: #94a3b8; flex: 0 0 58px; }
+  .cnt { flex: 1; min-width: 0; }
+  .src { font-weight: 600; color: #141821; margin-bottom: 2px; }
+  .tr { font-size: 10.2pt; color: #334155; margin-top: 2px; }
+  .tr-lbl { display: inline-block; font: 600 8pt/1.2 -apple-system, sans-serif; color: #9a6b16; background: #fef3c7; border-radius: 3px; padding: 1px 5px; margin-right: 6px; }
+  .gap { font: 600 9pt/1.4 -apple-system, sans-serif; color: #9a6b16; background: #fffbeb; border: 1px dashed #f59e0b; padding: 6px 10px; margin: 8px 0; text-align: center; }
+</style></head><body>
+  <div class="cover">
+    <div class="brand">Spark Live · Bilingual Session Record</div>
+    <h1>${esc(title)}</h1>
+    <div class="meta">${esc(dateStr)} &nbsp;·&nbsp; ${spoken.length} lines &nbsp;·&nbsp; ${esc(langSummary)}</div>
+    <div class="rule"></div>
+    <div class="rule-thin"></div>
+  </div>
+  <h2 class="part">Part 1 · Continuous Transcript / 完整連貫文稿</h2>
+  ${continuousHtml}
+  <h2 class="part">Part 2 · Timestamped Bilingual Log / 時間軸逐句對照</h2>
+  ${logHtml}
+  <script>window.onload=()=>{setTimeout(()=>window.print(),250)};</script>
+</body></html>`);
+  w.document.close();
+}
+
 $("dlTextBtn").onclick = () => saveTranscript(null);
+if ($("dlPdfBtn")) $("dlPdfBtn").onclick = () => printTranscript(null);
 
 /* One button per language next to the all-languages one. Asked for directly:
    the person checking the Dari and the person checking the Chinese are not the

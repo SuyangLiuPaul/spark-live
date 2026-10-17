@@ -934,24 +934,43 @@ function buildPrompt({ text, glossary, context, prior }) {
 }
 
 async function askGemini({ key, model, prompt, sys, signal }) {
-  const res = await fetch(`${GEMINI_URL}/${model}:generateContent?key=${encodeURIComponent(key)}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    signal,
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: sys }] },
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.15, responseMimeType: "application/json", maxOutputTokens: 4096,
-        // Gemini 2.5 "thinking" silently eats the output budget and truncates the
-        // JSON mid-string. For a live interpreter we want speed, not deliberation.
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    }),
-  });
-  if (!res.ok) throw new Error(`${res.status}: ${(await res.text().catch(() => "")).slice(0, 160)}`);
-  const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
+  const chain = [...new Set([
+    (!model || model.startsWith("gemini-2.5")) ? "gemini-3.5-flash" : model,
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+  ])];
+  let lastErr;
+  for (const m of chain) {
+    const genCfg = {
+      temperature: 0.15, responseMimeType: "application/json", maxOutputTokens: 4096,
+    };
+    if (!m.includes("lite")) genCfg.thinkingConfig = { thinkingBudget: 0 };
+    const res = await fetch(`${GEMINI_URL}/${m}:generateContent?key=${encodeURIComponent(key)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal,
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: sys }] },
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: genCfg,
+      }),
+    });
+    if (!res.ok) {
+      const err = new Error(`${res.status}: ${(await res.text().catch(() => "")).slice(0, 160)}`);
+      err.status = res.status;
+      lastErr = err;
+      if ([400, 404, 429, 500, 502, 503, 504].includes(res.status)) continue;
+      throw err;
+    }
+    const data = await res.json();
+    const text = (data?.candidates?.[0]?.content?.parts || [])
+      .filter((p) => !p.thought)
+      .map((p) => p.text || "")
+      .join("");
+    if (text) return text;
+  }
+  throw lastErr || new Error("Gemini empty response");
 }
 
 async function askOpenAICompat({ key, base, model, prompt, sys, signal }) {
@@ -980,8 +999,7 @@ async function askOpenAICompat({ key, base, model, prompt, sys, signal }) {
  * Provider table. Measured on real sermon audio (2026-07-02, 25 s window):
  *   groq  openai/gpt-oss-120b   2.4 s  clean Dari                ← primary
  *   groq  llama-3.3-70b         1.0 s  BROKEN — leaks Chinese into the Dari
- *   gemini-2.5-flash-lite       —      503 (transient "high demand")
- *   gemini-2.5-flash            —      429 (free tier ≈20/day)
+ *   gemini-3.5-flash            1.2 s  clean Dari (Free Tier)
  *   glm-5.2                    43.8 s  good quality, far too slow for live
  * Order = fast-and-good first, reliable-but-slow last.
  */
@@ -991,7 +1009,7 @@ export const LLM_PROVIDERS = {
   // Same key, 70k TPM vs 8k — the escape hatch when a long service out-paces
   // gpt-oss-120b's token budget. Measured 3.2 s, Dari quality comparable.
   groqHi: { label: "Groq · compound-mini", kind: "openai", base: "https://api.groq.com/openai/v1", model: "groq/compound-mini" },
-  gemini: { label: "Gemini Flash-Lite",   kind: "gemini", model: "gemini-2.5-flash-lite" },
+  gemini: { label: "Gemini 3.5 Flash",    kind: "gemini", model: "gemini-3.5-flash" },
   kimi:   { label: "Kimi (Moonshot)",     kind: "openai", base: "https://api.moonshot.ai/v1", model: "kimi-latest" },
   glm:    { label: "GLM 5.2",             kind: "openai", base: "https://api.z.ai/api/coding/paas/v4", model: "glm-5.2" },
 };

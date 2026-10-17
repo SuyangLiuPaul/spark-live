@@ -12,6 +12,53 @@ const ALLOWED = new Set(["openai/gpt-oss-120b", "groq/compound-mini", "llama-3.1
 const DEFAULT_MODEL = "openai/gpt-oss-120b";
 const MAX_CHARS = 24000;
 
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"];
+
+function geminiKeys() {
+  return String(process.env.GEMINI_API_KEY || process.env.SPARK_GEMINI_API_KEY || "")
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+async function askGeminiFallback(sys, prompt) {
+  const keys = geminiKeys();
+  if (!keys.length) return null;
+  for (const key of keys) {
+    for (const m of GEMINI_MODELS) {
+      const genCfg = {
+        temperature: 0.15,
+        responseMimeType: "application/json",
+        maxOutputTokens: 4096,
+        ...(m.includes("lite") ? {} : { thinkingConfig: { thinkingBudget: 0 } }),
+      };
+      try {
+        const r = await fetch(`${GEMINI_URL}/${m}:generateContent?key=${encodeURIComponent(key)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: sys }] },
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: genCfg,
+          }),
+        });
+        if (!r.ok) continue;
+        const data = await r.json();
+        const text = (data?.candidates?.[0]?.content?.parts || [])
+          .filter((p) => !p.thought)
+          .map((p) => p.text || "")
+          .join("")
+          .trim();
+        if (text) return { content: text, usage: null, via: m };
+      } catch {
+        continue;
+      }
+    }
+  }
+  return null;
+}
+
 export default async (req) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   const blocked = gateFails(req);
@@ -49,8 +96,10 @@ export default async (req) => {
       body: payload,
     }), "chat");
 
-  if (error) return json({ error }, status);
-  if (!res.ok) {
+  if (error || !res || !res.ok) {
+    const gem = await askGeminiFallback(sys, prompt);
+    if (gem) return json(gem);
+    if (error) return json({ error }, status);
     const detail = await res.text().catch(() => "");
     return json({ error: "upstream", status: res.status, detail: detail.slice(0, 300) }, res.status);
   }
@@ -62,6 +111,8 @@ export default async (req) => {
   try {
     data = await res.json();
   } catch (e) {
+    const gem = await askGeminiFallback(sys, prompt);
+    if (gem) return json(gem);
     return json({ error: "bad_upstream_json", detail: String(e.message || e).slice(0, 160) }, 502);
   }
   // `usage` is returned so a replay can total what a service actually costs; nothing in

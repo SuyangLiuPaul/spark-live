@@ -44,7 +44,7 @@ if [ -f public/config.js ]; then mv public/config.js "$STASH"; fi
 cp config.hosted.js public/config.js
 
 # The gate. Scan what is actually about to be uploaded, not what we intended.
-if grep -rlE 'gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,}|re_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}' public netlify 2>/dev/null; then
+if grep -rlE 'gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,}|AQ\.[A-Za-z0-9_-]{20,}|re_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}' public netlify 2>/dev/null; then
   echo "ABORT: a credential is present in the publish tree (files above)."
   exit 1
 fi
@@ -69,7 +69,7 @@ echo
 echo "── post-deploy check ──"
 for host in spark-live-translate spark-live-dev; do
   cfg=$(curl -s -m 20 "https://$host.netlify.app/config.js" || true)
-  keys=$(printf '%s' "$cfg" | grep -coE 'gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,}' || true)
+  keys=$(printf '%s' "$cfg" | grep -coE 'gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,}|AQ\.[A-Za-z0-9_-]{20,}' || true)
   proxy=$(printf '%s' "$cfg" | grep -c 'proxy' || true)
   # An empty asrRelay does not fail anything — it just silently disables the
   # Gemini option for every visitor, which is the sort of thing you discover
