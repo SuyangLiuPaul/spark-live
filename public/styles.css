@@ -519,3 +519,46 @@ textarea.short{min-height:52px}
    note to whoever edits the recording, not an alarm mid-service. */
 .line.mark{border-left-color:var(--warn);opacity:.75}
 .line.mark .src{font-style:italic;text-align:center}
+
+/* ── human review (presenter) ──
+   The operator's working area while review is on: the oldest waiting line is at the
+   top with the cursor in it, so the job is "read, fix if needed, Enter". */
+label.check{display:flex;align-items:flex-start;gap:9px;font-size:13.5px;color:var(--fg);cursor:pointer}
+label.check input{width:18px;height:18px;flex:none;margin-top:1px;accent-color:var(--accent2)}
+#reviewToggle[aria-pressed="true"]{border-color:rgba(255,198,92,.55);color:var(--warn);background:rgba(255,198,92,.09)}
+.review{margin-top:12px;padding:12px;border:1px solid rgba(255,198,92,.38);border-radius:var(--radius);background:rgba(255,198,92,.05)}
+.review[hidden]{display:none}
+.reviewhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.reviewhead strong{color:var(--warn);font-size:14px}
+.rcount{min-width:24px;height:22px;padding:0 7px;border-radius:999px;background:var(--warn);color:#1a1200;
+  font-size:12px;font-weight:800;display:inline-flex;align-items:center;justify-content:center}
+.rcount.zero{background:var(--panel2);color:var(--faint)}
+label.inline{display:inline;margin:0;font-weight:600}
+select.mini,button.mini{width:auto;padding:6px 10px;font-size:12.5px;border-radius:9px}
+.reviewlist{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.ritem{position:relative;display:flex;align-items:flex-start;gap:8px;padding:8px 8px 10px;border-radius:11px;
+  background:var(--panel);border:1px solid var(--line);animation:in .2s ease both;overflow:hidden}
+.ritem:first-child{border-color:rgba(255,198,92,.6)}
+.ritem:focus-within{border-color:var(--accent)}
+.rnum{flex:none;width:22px;padding-top:9px;text-align:center;font-size:12px;font-weight:800;color:var(--faint)}
+.ritem textarea{flex:1;min-height:0;resize:none;overflow:hidden;font-size:17px;line-height:1.55;padding:7px 10px;background:var(--panel2)}
+.ract{flex:none;display:flex;gap:5px}
+.ract button{padding:7px 11px;font-size:15px;border-radius:9px;line-height:1}
+.ract .rsend{background:linear-gradient(180deg,#7dffb0,#2fc088);border-color:transparent;color:#04121f}
+.ract .rdrop:hover{border-color:var(--bad);color:var(--bad)}
+/* Auto-send countdown: drains left to right; stops (full) while the line is being edited. */
+.rbar{position:absolute;left:0;bottom:0;height:3px;width:0;background:var(--warn);opacity:.75}
+.ritem.held .rbar{width:100% !important;transition:none !important;background:var(--accent)}
+.reviewempty{margin-top:10px;color:var(--faint);font-size:13px;font-style:italic}
+.reviewempty[hidden]{display:none}
+.manual{display:flex;gap:8px;margin-top:10px}
+.manual input{flex:1}
+.manual button{padding:9px 14px}
+@media(max-width:560px){
+  .ritem{flex-wrap:wrap}
+  .ritem textarea{flex-basis:calc(100% - 30px)}
+  .ract{width:100%;justify-content:flex-end}
+}
+
+/* Burmese needs its own font (Windows 7 ships none) and room above and below the line. */
+[lang="my"]{font-family:"Noto Sans Myanmar","Myanmar Text","Padauk",sans-serif;line-height:2.1}

@@ -96,6 +96,12 @@ for (const id of ["title", "context", "glossary", "groqKey", "groqKeys2", "gemin
   el.addEventListener("blur", () => LS.set(id, el.value));
 }
 
+/* Human review: a person approves each line before the room sees it. A function
+   declaration (hoisted) because syncAsrOption() below already needs it. */
+function reviewOn() { const el = $("reviewOn"); return !!(el && el.checked); }
+$("reviewOn").checked = LS.get("review") === "1";
+$("reviewAuto").value = LS.get("reviewAuto") || "0";
+
 /* Gemini is the DEFAULT engine as of 2026-08-31. Measured on the same 120 s of
    real Cantonese, Whisper wrote 「他是需要想的」 where the speaker said
    「佢係需要唞嘅」, so Whisper-by-default was shipping the congregation the worse
@@ -129,7 +135,8 @@ function syncAsrOption() {
   }
   if (!usable && sel.value !== "whisper") { sel.value = "whisper"; LS.set("asrEngine", "whisper"); }
   const hint = $("asrHint");
-  if (hint) hint.textContent = sel.value === "translate" && usable ? t("asrHintTranslate")
+  if (hint) hint.textContent = sel.value === "translate" && usable && reviewOn() ? t("reviewNoTranslate")
+                             : sel.value === "translate" && usable ? t("asrHintTranslate")
                              : ASR_RELAY ? t("asrHintRelay")
                              : usable ? t("asrHintReady") : t("asrHintNeedKey");
   // The source-language advice depends on the engine too. Measured 2026-08-31
@@ -351,13 +358,15 @@ let targets = (() => {
    are refused by the model). While it is the engine, that is the language the room
    gets, whatever is ticked below; the ticks are kept for when Whisper or Transcribe
    Live is chosen again. */
-const isTranslate = () => $("asrEngine") && $("asrEngine").value === "translate";
+// Live Translate hears and translates in one step, so there is no sentence for a person
+// to check in between: with review on, the session uses Transcribe Live instead.
+const isTranslate = () => $("asrEngine") && $("asrEngine").value === "translate" && !reviewOn();
 const liveTargets = () => (isTranslate() ? ["fa"] : targets);
 const langsOf = (list) => list.map((c) => ({ c, label: LANGS[c].label, rtl: !!LANGS[c].rtl }));
 
 function renderLangPick() {
   $("langpick").innerHTML = Object.entries(LANGS)
-    .map(([c, d]) => `<button data-c="${c}" class="${targets.includes(c) ? "on" : ""}">${d.label}</button>`).join("");
+    .map(([c, d]) => `<button data-c="${c}" lang="${d.rtl ? "prs" : c}" class="${targets.includes(c) ? "on" : ""}">${d.label}</button>`).join("");
   for (const b of $("langpick").querySelectorAll("button")) {
     b.onclick = () => {
       if (isTranslate()) { $("langHint").textContent = t("translateFixed"); return; }
@@ -452,7 +461,7 @@ function renderPreviewLang() {
   const cur = activePreview();
   el.style.display = liveTargets().length > 1 ? "" : "none";
   el.innerHTML = liveTargets().map((c) =>
-    `<button class="iconbtn lang ${c === cur ? "on" : ""}" data-c="${c}"${LANGS[c].rtl ? ' lang="prs"' : ""}>${LANGS[c].label}</button>`).join("");
+    `<button class="iconbtn lang ${c === cur ? "on" : ""}" data-c="${c}" lang="${LANGS[c].rtl ? "prs" : c}">${LANGS[c].label}</button>`).join("");
   for (const b of el.querySelectorAll(".lang")) b.onclick = () => {
     previewLang = b.dataset.c; LS.set("previewLang", previewLang);
     renderPreviewLang(); renderLines(); renderDraft();
@@ -557,13 +566,16 @@ function schedulePush() {
 
 const showErr = (m) => { $("err").textContent = m || ""; };
 
+// What the recogniser is hearing right now. The operator always sees it; the room
+// only does when review is off, because with review on nothing unapproved goes out.
+let localDraft = "";
 function renderDraft() {
   const primary = activePreview();
   const rtl = (LANGS[primary] || {}).rtl;
   $("draft").innerHTML = doc.interim
     ? `<div class="${rtl ? "rtl" : ""}" style="color:var(--warn)">${esc(doc.interim)}</div>
-       <div style="opacity:.6;margin-top:2px">${esc(doc.draft)}</div>`
-    : esc(doc.draft) || "…";
+       <div style="opacity:.6;margin-top:2px">${esc(localDraft)}</div>`
+    : esc(localDraft) || "…";
 }
 function renderLines() {
   const primary = activePreview();
@@ -572,7 +584,7 @@ function renderLines() {
     if (l.mark) return `<div class="line mark"><div class="src">— ${esc(l.src)} —</div></div>`;
     const main = (l.tr && l.tr[primary]) || "";
     return `<div class="line ${l.pending ? "pending" : ""} ${l.failed ? "failed" : ""}">
-      <div class="dari ${rtl ? "rtl" : ""}">${esc(main) || (l.pending ? t("translating") : "—")}</div>
+      <div class="dari ${rtl ? "rtl" : ""}" lang="${rtl ? "prs" : primary}">${esc(main) || (l.pending ? t("translating") : "—")}</div>
       <div class="src">${esc(l.src)}</div>
       ${l.heard ? `<div class="heard">${esc(t("heardLabel"))} ${esc(l.heard)}</div>` : ""}
     </div>`;
@@ -673,8 +685,11 @@ async function beginCapture({ resume = false } = {}) {
     // The engine falls back to Whisper on its own if the socket is ever
     // rejected, so a bad key or a dead relay degrades the transcript rather
     // than ending the service.
-    asr: ["gemini", "translate"].includes($("asrEngine").value) && (ASR_RELAY || $("geminiKey").value.trim())
-      ? $("asrEngine").value : "whisper",
+    asr: !["gemini", "translate"].includes($("asrEngine").value) || !(ASR_RELAY || $("geminiKey").value.trim())
+      ? "whisper"
+      : isTranslate() ? "translate" : "gemini",
+    review: reviewOn(),
+    reviewAutoMs: Number($("reviewAuto").value) || 0,
     asrRelay: ASR_RELAY,
     geminiKey: $("geminiKey").value.trim(),
     language: $("lang").value,
@@ -682,7 +697,13 @@ async function beginCapture({ resume = false } = {}) {
     context: $("context").value.trim(),
   }).events({
     level: (v) => { $("meterBar").style.width = Math.round(v * 100) + "%"; },
-    draft: (t) => { doc.draft = t || ""; renderDraft(); schedulePush(); },
+    draft: (t) => {
+      localDraft = t || "";
+      renderDraft();
+      const pub = reviewOn() ? "" : localDraft;
+      if (pub !== doc.draft) { doc.draft = pub; schedulePush(); }
+    },
+    review: (list) => renderReview(list),
     interim: (t) => { doc.interim = t || ""; renderDraft(); schedulePush(); },
     error: (e) => {
       const msg = String(e && e.message ? e.message : e);
@@ -829,6 +850,7 @@ async function beginCapture({ resume = false } = {}) {
   schedulePush();
 
   renderPreviewLang();
+  syncReviewUi();
   $("setupPanel").style.display = "none";
   $("livePanel").style.display = "";
   $("resumeBar").hidden = true;
@@ -1177,6 +1199,162 @@ function renderDlLangs() {
     `<button class="iconbtn lang" data-c="${l.c}"${l.rtl ? ' lang="prs"' : ""}>${esc(l.label || l.c)}</button>`).join("");
   for (const b of el.querySelectorAll(".lang")) b.onclick = () => saveTranscript(b.dataset.c);
 }
+
+/* ── human review ─────────────────────────────────────────────────────────
+   Asked for after the 2026-10-19 Mandarin sharing, where fast speech came out late
+   and garbled: "add a person to approve the text, with an input box and Enter".
+   The engine holds each line (engine.js, "human review"); this is the operator's
+   side. Rows are kept and updated in place rather than re-rendered, so a line
+   being typed into is never wiped by a new one arriving. */
+const rEls = new Map();            // rid -> row element
+
+function syncReviewUi() {
+  const on = reviewOn();
+  $("reviewPanel").hidden = !on;
+  const b = $("reviewToggle");
+  b.textContent = on ? t("reviewBtnOn") : t("reviewBtnOff");
+  b.setAttribute("aria-pressed", on ? "true" : "false");
+  b.title = t("reviewToggleTip");
+}
+
+$("reviewOn").addEventListener("change", () => {
+  const on = reviewOn();
+  LS.set("review", on ? "1" : "0");
+  syncAsrOption();
+  renderLangPick(); renderPreviewLang();
+  syncReviewUi();
+  if (engine) {
+    // Turning it off sends whatever is waiting, in order.
+    engine.setReview(on);
+    doc.draft = on ? "" : localDraft;
+    if (on) doc.interim = "";
+    renderDraft(); schedulePush();
+    toast(on ? t("reviewNowOn") : t("reviewNowOff"), "ok");
+  } else {
+    announceIdle();
+  }
+});
+$("reviewToggle").onclick = () => {
+  $("reviewOn").checked = !reviewOn();
+  $("reviewOn").dispatchEvent(new Event("change"));
+};
+$("reviewAuto").addEventListener("change", () => {
+  LS.set("reviewAuto", $("reviewAuto").value);
+  if (engine) { engine.cfg.reviewAutoMs = Number($("reviewAuto").value) || 0; renderReview(engine.reviewQ); }
+});
+$("reviewAllBtn").onclick = () => { if (engine) engine.approveAll(); };
+
+function fit(ta) { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + 2 + "px"; }
+function caretEnd(ta) { try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch {} }
+function focusRow(rid) {
+  const el = rEls.get(rid);
+  const ta = el && el.querySelector("textarea");
+  if (ta) { ta.focus({ preventScroll: true }); caretEnd(ta); }
+}
+
+function sendRow(rid) {
+  const el = rEls.get(rid);
+  if (!el || !engine) return;
+  engine.approve(rid, el.querySelector("textarea").value);
+}
+function dropRow(rid) { if (engine) engine.discard(rid); }
+function mergeRow(rid) {
+  const el = rEls.get(rid);
+  const nx = el && el.nextElementSibling;
+  if (!el || !nx || !engine) return;
+  const ta = el.querySelector("textarea");
+  engine.mergeNext(rid, ta.value, nx.querySelector("textarea").value);
+  const item = engine.reviewQ.find((r) => r.rid === rid);
+  if (item) { ta.value = item.text; fit(ta); }
+  ta.focus({ preventScroll: true }); caretEnd(ta);
+}
+
+function reviewRow(r) {
+  const el = document.createElement("div");
+  el.className = "ritem";
+  el.innerHTML = `<span class="rnum"></span><textarea rows="1" dir="auto" spellcheck="false"></textarea>
+    <div class="ract">
+      <button type="button" class="rsend" title="${esc(t("reviewSendTip"))}">✓</button>
+      <button type="button" class="rmerge" title="${esc(t("reviewMergeTip"))}">⤓</button>
+      <button type="button" class="rdrop" title="${esc(t("reviewDropTip"))}">✕</button>
+    </div><i class="rbar"></i>`;
+  const ta = el.querySelector("textarea");
+  ta.value = r.text;
+  ta.addEventListener("input", () => {
+    fit(ta);
+    el.classList.add("held");
+    if (engine) engine.edit(r.rid, ta.value);
+  });
+  ta.addEventListener("blur", () => { if (engine) engine.release(r.rid); });
+  ta.addEventListener("keydown", (e) => {
+    // An IME (Chinese, Persian…) uses Enter to pick characters; that Enter is not ours.
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); sendRow(r.rid); }
+    else if (e.key === "ArrowDown" && e.altKey) { e.preventDefault(); mergeRow(r.rid); }
+  });
+  el.querySelector(".rsend").onclick = () => sendRow(r.rid);
+  el.querySelector(".rdrop").onclick = () => dropRow(r.rid);
+  el.querySelector(".rmerge").onclick = () => mergeRow(r.rid);
+  return el;
+}
+
+/** Restart the auto-send countdown bar when a line's clock (re)starts. */
+function paintTimer(el, r) {
+  const bar = el.querySelector(".rbar");
+  const ms = engine ? engine.cfg.reviewAutoMs || 0 : 0;
+  if (!ms) { bar.style.transition = "none"; bar.style.width = "0"; el.dataset.at = ""; return; }
+  if (r.hold || el.dataset.at === String(r.at)) return;
+  el.dataset.at = String(r.at);
+  const left = Math.max(0, ms - (Date.now() - r.at));
+  bar.style.transition = "none";
+  bar.style.width = (left / ms) * 100 + "%";
+  void bar.offsetWidth;                         // commit the start before animating
+  bar.style.transition = `width ${left}ms linear`;
+  bar.style.width = "0";
+}
+
+function renderReview(list) {
+  const box = $("reviewList");
+  const keep = new Set(list.map((r) => r.rid));
+  for (const [rid, el] of rEls) if (!keep.has(rid)) { el.remove(); rEls.delete(rid); }
+  list.forEach((r, i) => {
+    let el = rEls.get(r.rid);
+    const fresh = !el;
+    if (fresh) { el = reviewRow(r); rEls.set(r.rid, el); }
+    if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
+    el.querySelector(".rnum").textContent = String(i + 1);
+    const ta = el.querySelector("textarea");
+    if (document.activeElement !== ta && ta.value !== r.text) ta.value = r.text;
+    if (fresh || document.activeElement !== ta) fit(ta);
+    el.classList.toggle("held", !!r.hold);
+    el.querySelector(".rmerge").disabled = i === list.length - 1;
+    paintTimer(el, r);
+  });
+  const n = list.length;
+  $("reviewCount").textContent = String(n);
+  $("reviewCount").classList.toggle("zero", !n);
+  $("reviewEmpty").hidden = n > 0;
+  // Ready for the next Enter: unless the operator is busy somewhere else, the cursor
+  // goes to the oldest waiting line.
+  const ae = document.activeElement;
+  const idle = !ae || ae === document.body || (ae.id === "manualIn" && !ae.value);
+  if (n && idle) focusRow(list[0].rid);
+}
+
+function sendManual() {
+  const v = $("manualIn").value.trim();
+  if (!v) return;
+  if (!engine) { toast(t("manualNotLive"), "bad"); return; }
+  engine.say(v);
+  $("manualIn").value = "";
+}
+$("manualBtn").onclick = sendManual;
+$("manualIn").addEventListener("keydown", (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.key === "Enter") { e.preventDefault(); sendManual(); }
+});
+syncReviewUi();
+window.addEventListener("ui:lang", syncReviewUi);
 
 window.addEventListener("beforeunload", (e) => {
   if (engine && doc.live) { e.preventDefault(); e.returnValue = ""; }

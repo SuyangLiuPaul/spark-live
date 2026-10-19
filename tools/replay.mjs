@@ -47,7 +47,8 @@ globalThis.WebSocket = class extends RealWS {
   constructor(url, protocols) { super(url, { headers: { Origin: ORIGIN }, ...(typeof protocols === "object" && !Array.isArray(protocols) ? protocols : {}) }); }
 };
 
-const { LiveEngine, KeyPool } = await import(path.join(ROOT, "public/engine.js"));
+// --engine public/engine.old.js: A/B a previous build on the same recording.
+const { LiveEngine, KeyPool } = await import(path.resolve(ROOT, flag("engine", "public/engine.js")));
 
 /* ── load the audio ── */
 const wav = fs.readFileSync(file);
@@ -64,6 +65,7 @@ const errors = [];
 const first = new Map();        // id -> when the sentence first appeared (pending)
 const done = new Map();         // id -> when its translation landed
 let finals = 0;
+let lastDraft = "";
 
 const eng = new LiveEngine({
   proxy: true, targets: [TARGET], language: LANG, llmChain: [{ id: "proxy" }],
@@ -79,7 +81,10 @@ const eng = new LiveEngine({
     if (flag("show-tr", "") && !l.pending && l.tr && l.tr[TARGET]) console.log(`                    ${TARGET}: ${String(l.tr[TARGET]).slice(0, 90)}`);
   },
   error: (e) => { errors.push({ t: at(), m: String(e && e.message || e) }); console.log(`${at().toFixed(1).padStart(6)}s  ERROR ${String(e && e.message || e).slice(0, 110)}`); },
-  draft: () => {}, interim: () => {}, level: () => {},
+  // --drafts: print the operator's live tail whenever it changes (what the recogniser
+  // has heard but not yet turned into a line).
+  draft: (d) => { if (flag("drafts", "") && d && d !== lastDraft) { lastDraft = d; console.log(`${at().toFixed(1).padStart(6)}s  draft  ${String(d).slice(-90)}`); } },
+  interim: () => {}, level: () => {},
   status: (s) => { if (s.reconnecting || s.fellBack) console.log(`${at().toFixed(1).padStart(6)}s  status ${JSON.stringify(s)}`); },
 });
 eng.pool = new KeyPool([]);

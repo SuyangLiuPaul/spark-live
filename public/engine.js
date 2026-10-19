@@ -76,7 +76,6 @@ const PCM_ARCHIVE_MAX = 45 * 60 * 16000;
 // How long to sit out after every key reports its daily cap spent.
 const EXHAUSTED_BACKOFF_MS = 60000;
 const SILENCE_FLUSH_MS = 700; // a pause this long ends a unit
-const MAX_SENTENCE_CHARS = 150;
 const MAX_UNIT_WAIT_MS = 6000;// never sit on committed text longer than this
 // A sentence may be taken out of an INTERIM once the server has moved past it.
 // Measured against the relay on 2026-09-13: "Good morning everyone." was complete
@@ -84,9 +83,81 @@ const MAX_UNIT_WAIT_MS = 6000;// never sit on committed text longer than this
 // 8.7 s. Waiting for the final is what put a whole paragraph on the room's screen
 // at once when the speaker never paused. Trailing text is the server's own proof
 // that it has committed to the sentence.
-const wordsOf = (s) => String(s || "").trim().split(/\s+/).filter(Boolean);
-// normWord lives with the stabiliser below; both users want the same thing —
-// a word stripped of exactly the case and punctuation the ASR keeps changing.
+
+/* ── tokens: a "word" in a language with no spaces ────────────────────────
+ *
+ * Everything that cuts a live stream into lines counts WORDS, and a word used to be
+ * "what lies between spaces". Chinese has none, so a whole Mandarin utterance was one
+ * word. Replayed on 2026-10-19 with 56 s of fast Mandarin (the 10-19 morning sharing,
+ * reported as "late, in a big stack, mixed up"): no sentence could be taken out of the
+ * live interim (that needs two words), the speaker never paused so no final came, and
+ * when it finally did, the one-word "already sent" count dropped ALL of it — one line
+ * out of 56 seconds of speech. So a token is a word in a spaced script and a single
+ * character in Chinese and Japanese, and lines are rebuilt without inventing spaces.
+ */
+const TIGHT_CH = "\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}ー々〆";
+const TIGHT_PUNCT = "，。！？、；：「」『』（）《》【】〈〉～·";
+const TOK_RE = new RegExp(`[${TIGHT_CH}]|[${TIGHT_PUNCT}]+|[^\\s${TIGHT_CH}${TIGHT_PUNCT}]+`, "gu");
+const TIGHT_RE = new RegExp(`^[${TIGHT_CH}${TIGHT_PUNCT}]`, "u");
+const CJK_RE = new RegExp(`^[${TIGHT_CH}]`, "u");
+export const toks = (s) => String(s || "").match(TOK_RE) || [];
+/** Tokens back into text: a space only between two spaced-script tokens. */
+export function joinToks(list) {
+  let out = "", prevTight = true;
+  for (const tk of list) {
+    const tight = TIGHT_RE.test(tk);
+    if (out && !tight && !prevTight) out += " ";
+    out += tk;
+    prevTight = tight;
+  }
+  return out;
+}
+/** Normalise spacing the same way whatever script it is in. */
+export const tidyText = (s) => joinToks(toks(s)).replace(/\s+([,.!?;:])/g, "$1").trim();
+/**
+ * How much there is to read, in English-word units. A Chinese character carries
+ * roughly half a word's meaning, so 2.5 characters count as one — which keeps every
+ * threshold below (fragment size, line length) meaning the same in both languages.
+ */
+export function units(list) {
+  let n = 0;
+  for (const tk of list) n += CJK_RE.test(tk) ? 0.4 : TIGHT_RE.test(tk) ? 0 : 1;
+  return n;
+}
+const SENT_END_RE = /[.!?。！？…]["'”’)\]」』]?$/;
+const CLAUSE_END_RE = /[,;:，；：]$/;
+// A line longer than this is split at its last comma before the limit. Readable at a
+// glance on a phone in either script: ~24 English words, ~60 Chinese characters.
+const MAX_LINE_UNITS = 24;
+// A speaker who never says a full stop still gets lines: once this much is pending
+// in the live interim, a comma the server has already moved past ends a line.
+const CLAUSE_HARVEST_UNITS = 14;
+const MIN_CLAUSE_UNITS = 6;
+
+/** Cut a long sentence into readable lines, preferring the last comma before the limit. */
+export function splitLong(text, max = MAX_LINE_UNITS) {
+  const all = toks(text);
+  if (units(all) <= max) return text ? [text] : [];
+  const out = [];
+  let start = 0;
+  while (start < all.length) {
+    let acc = 0, lastClause = -1, cut = all.length;
+    for (let i = start; i < all.length; i++) {
+      acc += units([all[i]]);
+      if (CLAUSE_END_RE.test(all[i]) && acc >= MIN_CLAUSE_UNITS) lastClause = i;
+      if (acc > max) { cut = lastClause >= 0 ? lastClause + 1 : i; break; }
+    }
+    if (cut <= start) cut = start + 1;
+    out.push(all.slice(start, cut));
+    start = cut;
+  }
+  // A last scrap of a few words reads better with the line before it.
+  if (out.length > 1 && units(out[out.length - 1]) < 4) {
+    const tail = out.pop();
+    out[out.length - 1] = out[out.length - 1].concat(tail);
+  }
+  return out.map(joinToks).filter(Boolean);
+}
 
 const HARVEST_TAIL_CHARS = 3;
 // A pause is not the end of a thought. Flushing every 0.7 s of quiet turned "The
@@ -578,8 +649,8 @@ export function repeatedPrefix(candNorm, hist) {
 
 /** True when a "corrected" sentence has wandered off its source instead of fixing it. */
 export function deviates(source, corrected) {
-  const A = String(source || "").split(/\s+/).map(normWord).filter(Boolean);
-  const B = String(corrected || "").split(/\s+/).map(normWord).filter(Boolean);
+  const A = toks(source).map(normWord).filter(Boolean);
+  const B = toks(corrected).map(normWord).filter(Boolean);
   // Three words is enough to tell: "Something like that" -> "That thing I love" shares one.
   if (A.length < 3) return false;
   const sim = lcsLen(A, B) / Math.max(A.length, B.length);
@@ -835,6 +906,14 @@ export const LANGS = {
   vi:        { label: "Tiếng Việt",en:"Vietnamese",rtl: false, note: "Vietnamese." },
   hi:        { label: "हिन्दी",     en: "Hindi",     rtl: false, note: "Hindi." },
   th:        { label: "ไทย",      en: "Thai",      rtl: false, note: "Thai." },
+  // Asked for 2026-10-19 for a member from Myanmar. Zawgyi is the legacy encoding that
+  // still circulates and renders as garbage on a Unicode phone, so the script is named.
+  my:        { label: "မြန်မာ",    en: "Burmese",   rtl: false, note:
+    "Burmese (မြန်မာဘာသာ) in standard UNICODE Myanmar script — never Zawgyi.\n"
+    + "     Natural spoken Burmese as used in a Myanmar church; use the Burmese Bible's terms:\n"
+    + "       God = ဘုရားသခင်   Jesus = ယေရှု   Holy Spirit = သန့်ရှင်းသောဝိညာဉ်တော်   gospel = ဧဝံဂေလိ\n"
+    // Measured 2026-10-19: gpt-oss-120b used the casual ငါ for the speaker's "I".
+    + "     Polite register: never ငါ or နင်. \"I\" = ကျွန်ုပ် (or ကျွန်တော်/ကျွန်မ when the speaker's gender is clear), \"we\" = ကျွန်ုပ်တို့." },
 };
 
 /**
@@ -1147,9 +1226,14 @@ export class LiveEngine {
       targets: ["prs"],        // audience languages, first = primary
       interim: true,           // cheap provisional translation of the live tail
       glossary: "", context: "",
+      review: false,           // a person approves each line before the room sees it
+      reviewAutoMs: 0,         // ...or it goes by itself after this long (0 = never)
       ...opts,
     };
-    this.on = { draft: () => {}, interim: () => {}, line: () => {}, status: () => {}, error: () => {}, level: () => {} };
+    if (this.cfg.review) this.cfg.interim = false;
+    this.on = { draft: () => {}, interim: () => {}, line: () => {}, status: () => {}, error: () => {}, level: () => {}, review: () => {} };
+    this.reviewQ = [];         // lines waiting for the operator, oldest first
+    this._rid = 0;
 
     this.buf = [];             // Float32Array chunks, 16 kHz mono, uncommitted tail
     this.bufLen = 0;
@@ -1287,8 +1371,8 @@ export class LiveEngine {
       src = src.replace(/\s+/g, " ").trim(); out = out.replace(/\s+/g, " ").trim();
       if (!src && !out) return;
       const id = ++this.seq;
-      this._sentNorm.push(...wordsOf(src).map(normWord).filter(Boolean));
-      if (this._sentNorm.length > 120) this._sentNorm.splice(0, this._sentNorm.length - 120);
+      this._sentNorm.push(...toks(src).map(normWord).filter(Boolean));
+      if (this._sentNorm.length > 200) this._sentNorm.splice(0, this._sentNorm.length - 200);
       this._lastSendAt = Date.now();
       this.on.line({ id, src, tr: { [target]: out }, pending: false, via: "live-translate", t: Date.now() });
     };
@@ -1417,7 +1501,9 @@ export class LiveEngine {
 
   /** Fire a confirm pass when one is due, whatever woke us. */
   _maybeTick() {
-    if (!this.running || this.busy) return;
+    if (!this.running) return;
+    this._reviewTick();
+    if (this.busy) return;
     // Streaming ASR: _tick() would return immediately (the overlap buffer is
     // empty by design), and the trailing-fragment flush lives inside it — so
     // without this a last part-sentence would sit unsent until Stop. Waiting
@@ -1433,7 +1519,7 @@ export class LiveEngine {
         const idle = Date.now() - this.lastVoiceAt;
         const stale = this.pendingSince && Date.now() - this.pendingSince > MAX_UNIT_WAIT_MS;
         const tail = this.sentence.trim();
-        const chunky = wordsOf(tail).length >= FRAGMENT_MIN_WORDS || /[.!?。！？…]["'”’)\]]?$/.test(tail);
+        const chunky = units(toks(tail)) >= FRAGMENT_MIN_WORDS || SENT_END_RE.test(tail);
         const ready = (idle > SILENCE_FLUSH_MS && chunky) || idle > FRAGMENT_PATIENCE_MS;
         if ((ready && !this._gInterim) || stale) this._flushSentence();
       }
@@ -1642,7 +1728,7 @@ export class LiveEngine {
       // Same rule as the streaming path: a pause sends a real chunk, not half a thought.
       const idle = Date.now() - this.lastVoiceAt;
       const tail2 = this.sentence.trim();
-      const chunky = wordsOf(tail2).length >= FRAGMENT_MIN_WORDS || /[.!?。！？…]["'”’)\]]?$/.test(tail2);
+      const chunky = units(toks(tail2)) >= FRAGMENT_MIN_WORDS || SENT_END_RE.test(tail2);
       if (tail2 && ((idle > SILENCE_FLUSH_MS && chunky) || idle > FRAGMENT_PATIENCE_MS)) this._flushSentence();
     } finally {
       this.busy = false;
@@ -1705,8 +1791,32 @@ Reply with JSON only: {"t":"..."}`;
 
   /** The part of the current interim that has not been sent as a line yet. */
   _unharvested(text) {
-    const n = wordsOf(this._gUttEmitted).length;
-    return n ? wordsOf(text).slice(n).join(" ") : String(text || "");
+    const all = toks(text);
+    const n = this._takenIn(all);
+    return n > all.length ? tidyText(text) : joinToks(all.slice(n));
+  }
+
+  /**
+   * Where, in this interim, the part already sent ends — found by LETTERS, not by
+   * counting words. The server re-spaces its interims from frame to frame ("could
+   * not stop" one moment, "could notstop" the next), so a word count taken on one
+   * frame lands a word off on the next: "They told me…" went out as "told me…".
+   * The letters themselves do not move. Returns all.length + 1 when this interim is
+   * shorter than what was taken, i.e. the server has started a new utterance.
+   */
+  _takenIn(all) {
+    const want = toks(this._gUttEmitted).map(normWord).join("").length;
+    if (!want) return 0;
+    let acc = 0;
+    for (let i = 0; i < all.length; i++) {
+      acc += normWord(all[i]).length;
+      if (acc >= want) {
+        let j = i + 1;
+        while (j < all.length && !normWord(all[j])) j++;   // its closing punctuation
+        return j;
+      }
+    }
+    return all.length + 1;
   }
 
   /**
@@ -1716,23 +1826,37 @@ Reply with JSON only: {"t":"..."}`;
    * words after it is the server's own statement that it has settled that
    * sentence; a terminator at the very END of an interim is still a guess and
    * routinely vanishes on the next frame.
+   *
+   * A speaker who never says a full stop — fast Mandarin strung together with
+   * commas is the measured case — would otherwise be held back until they took a
+   * breath, and then land on the screen as a paragraph. Once enough is pending, a
+   * COMMA the server has moved past ends a line as well.
    */
   _harvest(text) {
-    const all = wordsOf(text);
-    let taken = wordsOf(this._gUttEmitted).length;
-    // Fewer words than we have already taken means the server moved on to a
+    const all = toks(text);
+    let taken = this._takenIn(all);
+    // Shorter than what we have already taken means the server moved on to a
     // new utterance: there is nothing left to de-duplicate against.
-    if (all.length < taken) { this._gUttEmitted = ""; taken = 0; }
+    if (taken > all.length) { this._gUttEmitted = ""; taken = 0; }
     const rest = all.slice(taken);
     if (rest.length < 2) return;
-    let end = -1;
+    let end = -1, clause = false;
     for (let i = 0; i < rest.length - 1; i++) {
-      if (/[.!?。！？…]["\'”’)\]]?$/.test(rest[i])) end = i;
+      if (SENT_END_RE.test(rest[i])) end = i;
+    }
+    if (end < 0 && units(rest) >= CLAUSE_HARVEST_UNITS) {
+      let acc = 0;
+      for (let i = 0; i < rest.length - 1; i++) {
+        acc += units([rest[i]]);
+        if (CLAUSE_END_RE.test(rest[i]) && acc >= MIN_CLAUSE_UNITS) { end = i; clause = true; }
+      }
     }
     if (end < 0) return;
-    if (rest.slice(end + 1).join(" ").length < HARVEST_TAIL_CHARS) return;
-    this._gUttEmitted = all.slice(0, taken + end + 1).join(" ");
-    this._commit(rest.slice(0, end + 1).join(" "));
+    // A closing quote belongs with the sentence it closes.
+    while (end + 2 < rest.length && /^["'”’」』)\]]+$/.test(rest[end + 1])) end++;
+    if (joinToks(rest.slice(end + 1)).length < HARVEST_TAIL_CHARS) return;
+    this._gUttEmitted = joinToks(all.slice(0, taken + end + 1));
+    this._commit(joinToks(rest.slice(0, end + 1)), { clause });
   }
 
   /**
@@ -1742,27 +1866,34 @@ Reply with JSON only: {"t":"..."}`;
    * the final can spell a number out ("8" → "eight") and move the boundary by a
    * word. If the anchor is nowhere near where it should be, the raw count is
    * used: showing the room the same sentence twice is a worse failure than
-   * clipping a word off the front of the next one.
+   * clipping a word off the front of the next one. Counted over tokens that carry
+   * letters only — the server moves its commas around between interim and final.
    */
   _dropHarvested(text) {
-    const emitted = wordsOf(this._gUttEmitted);
-    if (!emitted.length) return String(text || "");
-    const fw = wordsOf(text);
+    const emitted = toks(this._gUttEmitted).map(normWord).filter(Boolean);
+    if (!emitted.length) return tidyText(text);
+    const fw = toks(text);
+    const pos = [];
+    fw.forEach((tk, i) => { if (normWord(tk)) pos.push(i); });
+    const nf = pos.map((i) => normWord(fw[i]));
     const n = emitted.length;
-    const a = normWord(emitted[n - 1]);
-    const b = n > 1 ? normWord(emitted[n - 2]) : "";
-    const fits = (k) => k >= 1 && k <= fw.length && normWord(fw[k - 1]) === a
-      && (!b || k < 2 || normWord(fw[k - 2]) === b);
-    let cut = Math.min(n, fw.length);
-    for (const k of [n, n - 1, n + 1, n - 2, n + 2, n - 3, n + 3]) {
-      if (fits(k)) { cut = k; break; }
+    const a = emitted[n - 1];
+    const b = n > 1 ? emitted[n - 2] : "";
+    const fits = (k) => k >= 1 && k <= nf.length && nf[k - 1] === a && (!b || k < 2 || nf[k - 2] === b);
+    let k = Math.min(n, nf.length);
+    for (const c of [n, n - 1, n + 1, n - 2, n + 2, n - 3, n + 3]) {
+      if (fits(c)) { k = c; break; }
     }
-    return fw.slice(cut).join(" ");
+    if (k <= 0) return joinToks(fw);
+    let cut = k >= nf.length ? fw.length : pos[k - 1] + 1;
+    // Punctuation right after the cut closed what was already sent.
+    while (cut < fw.length && !normWord(fw[cut])) cut++;
+    return joinToks(fw.slice(cut));
   }
 
   /** Words that have gone out (or are about to), newest last, for repeat detection. */
   _history() {
-    return [...this._sentNorm, ...wordsOf(this.sentence).map(normWord).filter(Boolean)];
+    return [...this._sentNorm, ...toks(this.sentence).map(normWord).filter(Boolean)];
   }
 
   /**
@@ -1770,12 +1901,12 @@ Reply with JSON only: {"t":"..."}`;
    * already sent. See repeatedPrefix for why this exists alongside _dropHarvested.
    */
   _dropRepeated(text) {
-    const raw = wordsOf(String(text || "").replace(/([.!?…])(?=[\p{L}\p{N}])/gu, "$1 "));
+    const raw = toks(String(text || "").replace(/([.!?…])(?=[\p{L}\p{N}])/gu, "$1 "));
     if (!raw.length) return "";
     const norm = raw.map(normWord);
     const keep = norm.map((w) => !!w);
     const rawK = raw.filter((_, i) => keep[i]), normK = norm.filter(Boolean);
-    if (!normK.length) return raw.join(" ");
+    if (!normK.length) return joinToks(raw);
     const hist = this._history().slice(-80);
 
     // A leftover of one or two words that is exactly the end of what was just sent
@@ -1787,19 +1918,24 @@ Reply with JSON only: {"t":"..."}`;
     if (cut >= normK.length) return "";
     // Wholly contained in the last stretch, even if not contiguous with its end.
     if (normK.length >= 5 && lcsLen(normK, hist.slice(-60)) / normK.length >= 0.9) return "";
-    return rawK.slice(cut).join(" ");
+    if (!cut) return joinToks(raw);
+    // Keep the punctuation that belongs to the kept words.
+    const keptAt = [];
+    keep.forEach((k, i) => { if (k) keptAt.push(i); });
+    return joinToks(raw.slice(keptAt[cut]));
   }
 
-  _commit(text) {
-    const t = String(text || "").replace(/\s+/g, " ").replace(/\s+([,.!?;:，。！？；：])/g, "$1").trim();
+  _commit(text, { clause = false } = {}) {
+    const t = tidyText(text);
     if (!t) return;
     if (!this.sentence) this.pendingSince = Date.now();
-    this.sentence = (this.sentence ? this.sentence + " " : "") + t;
+    this.sentence = tidyText(`${this.sentence} ${t}`);
 
-    // Prefer a real sentence boundary; fall back to length so an unpunctuated
-    // speaker still gets delivered in readable pieces.
-    if (this._drainSentences()) return;
-    if (this.sentence.length >= MAX_SENTENCE_CHARS) this._flushSentence();
+    // Prefer a real sentence boundary; a clause the server has moved past is a line
+    // of its own; and length is the last resort, so an unpunctuated speaker still gets
+    // delivered in readable pieces.
+    this._drainSentences();
+    if (clause || units(toks(this.sentence)) >= MAX_LINE_UNITS) this._flushSentence();
   }
 
   /**
@@ -1819,14 +1955,15 @@ Reply with JSON only: {"t":"..."}`;
   _drainSentences() {
     let sent = false;
     for (;;) {
-      const m = this.sentence.match(/^([\s\S]*?[.!?。！？…]+["'”’)\]]?)\s*([\s\S]*)$/);
+      const m = this.sentence.match(/^([\s\S]*?[.!?。！？…]+["'”’)\]」』]?)\s*([\s\S]*)$/);
       if (!m) break;
       const done = m[1].trim();
       this.sentence = m[2] || "";
       // The tail that is left is a new, unfinished unit: time it from now, or
       // MAX_UNIT_WAIT_MS would measure from a sentence that has already gone.
       this.pendingSince = this.sentence ? Date.now() : 0;
-      if (done) { this._send(done); sent = true; }
+      // One sentence can still be a paragraph (a speaker who only uses commas).
+      for (const piece of splitLong(done)) { this._send(piece); sent = true; }
     }
     return sent;
   }
@@ -1837,21 +1974,125 @@ Reply with JSON only: {"t":"..."}`;
     this._drainSentences();
     const s = this.sentence.trim();
     this.sentence = ""; this.pendingSince = 0;
-    if (s) this._send(s);
+    for (const piece of splitLong(s)) this._send(piece);
   }
 
   _send(source) {
     this.on.interim(""); this._interimSrc = "";
-    const id = ++this.seq;
-    // History for repeat detection, and context for the sentences that follow.
-    this._sentNorm.push(...wordsOf(source).map(normWord).filter(Boolean));
-    if (this._sentNorm.length > 120) this._sentNorm.splice(0, this._sentNorm.length - 120);
+    // History for repeat detection is about what the RECOGNISER produced, so it is
+    // kept whether or not a person goes on to approve, change or drop the line.
+    this._sentNorm.push(...toks(source).map(normWord).filter(Boolean));
+    if (this._sentNorm.length > 200) this._sentNorm.splice(0, this._sentNorm.length - 200);
     this._lastSendAt = Date.now();
+    if (this.cfg.review) { this._queueReview(source); return; }
+    this._dispatch(source);
+  }
+
+  /** Put a line in front of the room: show it as pending and queue its translation. */
+  _dispatch(source, { strict = false, heard = "" } = {}) {
+    const id = ++this.seq;
+    // Context for the sentences that follow.
     this._ctx.push({ id, text: source });
     if (this._ctx.length > 8) this._ctx.shift();
     this.on.line({ id, src: source, tr: {}, pending: true, t: Date.now() });
-    this.jobs.push({ id, source, state: "wait", out: null });
+    this.jobs.push({ id, source, strict, heard, state: "wait", out: null });
     this._pump();
+    return id;
+  }
+
+  /* ── human review ─────────────────────────────────────────────────────────
+   *
+   * Asked for after the 2026-10-19 Mandarin sharing: a person who reads the
+   * spoken language checks each line before the room sees it. Lines wait here
+   * instead of going to the translator. The operator sends one as heard or
+   * corrected, joins two the recogniser cut in the wrong place, or drops one;
+   * they can also type a line of their own. Optional auto-send keeps a busy
+   * operator from becoming the reason the room falls behind.
+   */
+  _queueReview(text) {
+    this.reviewQ.push({ rid: ++this._rid, text, heard: text, at: Date.now(), hold: false });
+    this._emitReview();
+  }
+
+  _emitReview() { this.on.review(this.reviewQ.map((r) => ({ ...r }))); }
+
+  _ri(rid) { return this.reviewQ.findIndex((r) => r.rid === rid); }
+
+  /** Send a waiting line to the room, with the operator's text if they changed it. */
+  approve(rid, text) {
+    const i = this._ri(rid);
+    if (i < 0) return false;
+    const [item] = this.reviewQ.splice(i, 1);
+    const t = tidyText(text == null ? item.text : text);
+    if (t) {
+      // Changed by a person — even a single punctuation mark — so translate exactly
+      // that. Untouched: the usual correction pass still runs, so pressing Enter on a
+      // mis-heard word is no worse than not reviewing at all.
+      this._dispatch(t, t !== tidyText(item.heard) ? { strict: true, heard: item.heard } : {});
+    }
+    this._emitReview();
+    return true;
+  }
+
+  discard(rid) {
+    const i = this._ri(rid);
+    if (i < 0) return;
+    this.reviewQ.splice(i, 1);
+    this._emitReview();
+  }
+
+  /** Join a line with the one after it — the recogniser cut a sentence in two. */
+  mergeNext(rid, text, nextText) {
+    const i = this._ri(rid);
+    if (i < 0 || i + 1 >= this.reviewQ.length) return;
+    const a = this.reviewQ[i], b = this.reviewQ[i + 1];
+    a.text = tidyText(`${text == null ? a.text : text} ${nextText == null ? b.text : nextText}`);
+    a.heard = tidyText(`${a.heard} ${b.heard}`);
+    a.at = Date.now();
+    this.reviewQ.splice(i + 1, 1);
+    this._emitReview();
+  }
+
+  /** The operator is typing in this line: hold it until they stop. */
+  edit(rid, text) {
+    const r = this.reviewQ[this._ri(rid)];
+    if (r) { r.text = String(text || ""); r.hold = true; }
+  }
+
+  /** They left the line: give it a fresh full wait before auto-send may take it. */
+  release(rid) {
+    const r = this.reviewQ[this._ri(rid)];
+    if (r && r.hold) { r.hold = false; r.at = Date.now(); this._emitReview(); }
+  }
+
+  approveAll() { for (const r of this.reviewQ.slice()) this.approve(r.rid); }
+
+  /** A line the operator typed from scratch — a verse reference, a name, a fix. */
+  say(text) {
+    const t = tidyText(text);
+    if (t) this._dispatch(t, { strict: true });
+  }
+
+  /** Turn review on or off mid-service. Turning it off sends whatever is waiting. */
+  setReview(on) {
+    this.cfg.review = !!on;
+    // The provisional "live tail" translation is of text nobody has approved.
+    this.cfg.interim = !on;
+    if (on) this.on.interim("");
+    else this.approveAll();
+  }
+
+  _reviewTick() {
+    const ms = this.cfg.reviewAutoMs || 0;
+    if (!this.cfg.review || !ms || !this.reviewQ.length) return;
+    const now = Date.now();
+    // Oldest first, and never past a line the operator is still working on: the
+    // room must not read sentence 5 before sentence 4.
+    while (this.reviewQ.length) {
+      const r = this.reviewQ[0];
+      if (r.hold || now - r.at < ms) break;
+      this.approve(r.rid);
+    }
   }
 
   /** Start waiting translations, up to the parallel limit. */
@@ -1889,6 +2130,15 @@ Reply with JSON only: {"t":"..."}`;
     const prompt = buildPrompt({ text: source, glossary: this.cfg.glossary, context: this.cfg.context, prior });
     const guarded = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("translation timed out")), JOB_TIMEOUT_MS))]);
 
+    // A line a person wrote or corrected is the ground truth: translate it, never "fix" it.
+    if (job.strict) {
+      const { raw, via } = await guarded(askChain(this.cfg.llmChain, prompt, buildSys(this.cfg.targets, this.cfg.language, { strict: true })));
+      const out = parseJson(raw) || {};
+      const tr = {};
+      for (const c of this.cfg.targets) tr[c] = String((out.tr && out.tr[c]) || "").trim();
+      return { corrected: source, tr, via, heard: job.heard || "" };
+    }
+
     let { raw, via } = await guarded(askChain(this.cfg.llmChain, prompt, buildSys(this.cfg.targets, this.cfg.language)));
     let out = parseJson(raw) || {};
     let corrected = String(out.corrected || source).trim();
@@ -1913,8 +2163,8 @@ Reply with JSON only: {"t":"..."}`;
     // (not mere case or punctuation). The operator can read the language being spoken
     // and the audience cannot, so this is the one place a wrong "correction" can be
     // caught by a person — and the Monday review needs it to find them.
-    const w = (x) => wordsOf(x).map(normWord).filter(Boolean).join(" ");
-    const heard = w(source) !== w(corrected) ? source : "";
+    const w = (x) => toks(x).map(normWord).filter(Boolean).join(" ");
+    const heard = job.heard || (w(source) !== w(corrected) ? source : "");
     return { corrected, tr, via, heard };
   }
 
@@ -1926,6 +2176,15 @@ Reply with JSON only: {"t":"..."}`;
   /** Finish the current sentence and wait for the queue to drain. */
   async drain() {
     if (this._tl) this._tlEmit(true);
+    // What the recogniser has heard but not finalised is part of the service too.
+    // Stop used to throw it away — with a speaker who never paused, that was most
+    // of what they said. Only after stop(): mid-session (the recording download)
+    // the final is still coming and will carry it.
+    if (!this.running && this._gInterim) {
+      const rest = this._dropRepeated(this._unharvested(this._gInterim));
+      this._gInterim = ""; this._gUttEmitted = "";
+      if (rest) this._commit(rest);
+    }
     this._flushSentence();
     await this.translateQueue;
     // The recorder's last slice lands after stop(); without this the download

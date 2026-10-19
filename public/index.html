@@ -21,8 +21,8 @@
 <meta name="twitter:card" content="summary_large_image" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&display=swap" />
-<link rel="stylesheet" href="/styles.css?v=24" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&family=Noto+Sans+Myanmar:wght@400;500;600&display=swap" />
+<link rel="stylesheet" href="/styles.css?v=25" />
 </head>
 <body>
 <div class="wrap">
@@ -56,12 +56,76 @@
       <div class="langpick" id="langpick"></div>
       <div class="hint" id="langHint"></div>
     </div>
+    <div class="field">
+      <label class="check" for="reviewOn">
+        <input type="checkbox" id="reviewOn" />
+        <span data-i18n="reviewLabel">Review before showing — a person checks each sentence</span>
+      </label>
+      <div class="hint" data-i18n="reviewHint">Each sentence waits in a list on this screen. Fix any wrong words, then press Enter to send it to the audience, translated. Nothing reaches the room until you send it.</div>
+    </div>
     <div class="row">
       <button class="primary big-start" id="startBtn" data-i18n="start">▶ Start</button>
       <span class="sub" id="setupMsg"></span>
     </div>
     <div class="hint" id="readyHint" style="margin-top:10px"></div>
     <div class="hint" id="quotaHint" style="margin-top:4px"></div>
+  </div>
+
+  <!-- ══ LIVE ══ -->
+  <!-- Above the QR on purpose: once the service is running, the operator works in
+       this panel (review list, live lines) and the join code is set-and-forget. -->
+  <div class="panel" id="livePanel" style="display:none">
+    <!-- Shown only when the console was reopened while a session was still
+         marked live. The audience keeps reading the restored transcript; this
+         is the one tap needed to put the microphone back. -->
+    <div class="resumebar" id="resumeBar" hidden>
+      <div>
+        <strong data-i18n="resumeTitle">Session interrupted</strong>
+        <div class="sub" data-i18n="resumeBody">The audience is still connected and can see the transcript so far. Press Resume to start listening again.</div>
+      </div>
+      <button class="primary" id="resumeBtn" data-i18n="resume">▶ Resume</button>
+    </div>
+    <div class="meter"><i id="meterBar"></i></div>
+    <div class="row" style="margin-bottom:6px">
+      <button class="danger" id="stopBtn" data-i18n="stop">■ Stop</button>
+      <button id="newBtn" style="display:none" data-i18n="newSession">↻ New session</button>
+      <button id="dlBtn" data-i18n="download">Download recording</button>
+      <button id="dlTextBtn" data-i18n="downloadText">Download transcript</button>
+      <button id="dlPdfBtn" data-i18n="downloadPdf">Download PDF</button>
+      <span class="langsel" id="dlLangs"></span>
+      <button id="reviewToggle" type="button" aria-pressed="false">✋</button>
+      <button id="settingsBtn" data-i18n="settings">⚙ Settings</button>
+      <span class="sub" id="statMsg"></span>
+    </div>
+    <div class="row" style="margin:2px 0 8px"><div class="langsel" id="previewLang"></div></div>
+    <div class="draft" id="draft">…</div>
+    <div class="err" id="err"></div>
+    <!-- Human review. Lines wait here instead of going straight to the room; see
+         the "human review" section of engine.js. -->
+    <section class="review" id="reviewPanel" hidden>
+      <div class="reviewhead">
+        <strong data-i18n="reviewHead">Waiting for your OK</strong>
+        <span class="rcount" id="reviewCount">0</span>
+        <span class="spacer"></span>
+        <label class="inline" for="reviewAuto" data-i18n="reviewAuto">Auto-send</label>
+        <select id="reviewAuto" class="mini">
+          <option value="0" data-i18n="reviewAutoOff">Off</option>
+          <option value="8000">8 s</option>
+          <option value="15000">15 s</option>
+          <option value="30000">30 s</option>
+        </select>
+        <button class="mini" id="reviewAllBtn" type="button" data-i18n="reviewAll">Send all</button>
+      </div>
+      <div class="hint" data-i18n="reviewKeys">Enter = send · Shift+Enter = new line · Alt+↓ = join with the next line</div>
+      <div class="reviewlist" id="reviewList"></div>
+      <div class="reviewempty" id="reviewEmpty" data-i18n="reviewEmpty">Nothing waiting. New sentences appear here as they are heard.</div>
+      <div class="manual">
+        <input id="manualIn" autocomplete="off" data-i18n-ph="manualPh" placeholder="Type a line yourself and press Enter (a verse, a name…)" />
+        <button id="manualBtn" type="button" data-i18n="manualSend">Send</button>
+      </div>
+    </section>
+    <hr style="border:none;border-top:1px solid var(--line);margin:14px 0" />
+    <div class="lines" id="lines"></div>
   </div>
 
   <!-- ══ AUDIENCE ══ -->
@@ -84,36 +148,6 @@
         </div>
       </div>
     </div>
-  </div>
-
-  <!-- ══ LIVE ══ -->
-  <div class="panel" id="livePanel" style="display:none">
-    <!-- Shown only when the console was reopened while a session was still
-         marked live. The audience keeps reading the restored transcript; this
-         is the one tap needed to put the microphone back. -->
-    <div class="resumebar" id="resumeBar" hidden>
-      <div>
-        <strong data-i18n="resumeTitle">Session interrupted</strong>
-        <div class="sub" data-i18n="resumeBody">The audience is still connected and can see the transcript so far. Press Resume to start listening again.</div>
-      </div>
-      <button class="primary" id="resumeBtn" data-i18n="resume">▶ Resume</button>
-    </div>
-    <div class="meter"><i id="meterBar"></i></div>
-    <div class="row" style="margin-bottom:6px">
-      <button class="danger" id="stopBtn" data-i18n="stop">■ Stop</button>
-      <button id="newBtn" style="display:none" data-i18n="newSession">↻ New session</button>
-      <button id="dlBtn" data-i18n="download">Download recording</button>
-      <button id="dlTextBtn" data-i18n="downloadText">Download transcript</button>
-      <button id="dlPdfBtn" data-i18n="downloadPdf">Download PDF</button>
-      <span class="langsel" id="dlLangs"></span>
-      <button id="settingsBtn" data-i18n="settings">⚙ Settings</button>
-      <span class="sub" id="statMsg"></span>
-    </div>
-    <div class="row" style="margin:2px 0 8px"><div class="langsel" id="previewLang"></div></div>
-    <div class="draft" id="draft">…</div>
-    <div class="err" id="err"></div>
-    <hr style="border:none;border-top:1px solid var(--line);margin:14px 0" />
-    <div class="lines" id="lines"></div>
   </div>
 
   <!-- ══ SETTINGS ══ -->
@@ -203,7 +237,6 @@
         </div>
       </details>
     </section>
-  </details>
   </details>
 
   <footer class="sitefoot">

@@ -551,6 +551,98 @@ await section("live translate pairs each line with its own translation", async (
   check("every line carries the room's language only", lines.every((l) => Object.keys(l.tr).join() === "fa"));
 });
 
+/* ═══ 7g. fast Mandarin, and a person who approves each line — offline ═══
+   2026-10-19 morning sharing, Mandarin, fast, strung together with commas:
+   "the translation came late, in a big stack, mixed up". Replayed, the old engine
+   showed ONE line for 56 s of speech — Chinese has no spaces, so the whole
+   utterance counted as one word and every word-count step failed. The church
+   also asked for a person to approve each line before the room sees it. */
+await section("Chinese lines and human review", async () => {
+  const eng = await import(path.join(ROOT, "public/engine.js"));
+  const outer = globalThis.fetch;
+  check("Chinese is counted by character", eng.toks("我们要学会照顾自己，").length === 10, String(eng.toks("我们要学会照顾自己，").length));
+  check("and put back together without spaces", eng.joinToks(eng.toks("照顾 自己， 因为 Paul 说")) === "照顾自己，因为Paul说",
+        eng.joinToks(eng.toks("照顾 自己， 因为 Paul 说")));
+  check("English spacing is left alone", eng.tidyText("Good  morning everyone.") === "Good morning everyone.");
+  const long = "所以我想鼓励大家，每个礼拜给自己留一点安静的时间，好好休息，好好读经，好好祷告，让神来更新我们的力量，"
+    + "因为如果我们不照顾好自己，我们的属灵生命也会受影响，我们也没有力量去服侍别人，";
+  const parts = eng.splitLong(long);
+  check("a long comma-only sentence is cut at commas", parts.length >= 2 && parts.every((p) => /，$/.test(p)), parts.join(" | "));
+  check("…and nothing is lost in the cutting", parts.join("") === long);
+
+  const text = "我想跟大家分享一下这几年我学到的功课，就是我们要学会照顾自己，因为如果我们连自己的身体都照顾不好，我们就只能待在家里，没有办法出去跟别人分享福音。我记得刚来美国的时候我很着急，一到就马上找了一份工作，可是那个时候很多事情都同时发生，我在学校一直生病，车子也撞坏了，";
+  const run = (spaced) => {
+    const e = new eng.LiveEngine({ proxy: true, targets: ["en"], language: "zh", llmChain: [{ id: "proxy" }], review: true })
+      .events({ line() {}, error() {}, draft() {}, interim() {}, status() {}, level() {}, review() {} });
+    e.running = true;
+    // The server re-spaces its interims from frame to frame; the letters do not move.
+    for (let i = 4; i <= text.length; i += 3) {
+      let t = text.slice(0, i);
+      if (spaced && i % 2) t = t.replace(/，/g, "， ");
+      e._gInterim = t; e._harvest(t);
+    }
+    const rest = e._dropRepeated(e._dropHarvested(text));
+    e._gUttEmitted = "";
+    if (rest) e._commit(rest);
+    e._flushSentence();
+    return e.reviewQ.map((r) => r.text);
+  };
+  for (const spaced of [false, true]) {
+    const got = run(spaced);
+    const tag = spaced ? " (re-spaced interims)" : "";
+    check(`fast Mandarin with only commas comes out line by line${tag}`, got.length >= 5, `${got.length} lines`);
+    check(`nothing lost, nothing said twice${tag}`, got.join("") === text, got.join(" | "));
+    check(`no line longer than a phone screen holds${tag}`, got.every((s) => s.length <= 70), String(Math.max(...got.map((s) => s.length))));
+  }
+
+  const chat = [];
+  globalThis.fetch = async (u, init) => {
+    if (!String(u).includes("/api/chat")) return outer(u, init);
+    const b = JSON.parse(init.body); chat.push(b);
+    return { ok: true, status: 200, json: async () => ({ content: JSON.stringify({ corrected: "MODEL REWROTE THIS", tr: { en: "translated" } }) }) };
+  };
+  try {
+    const lines = [];
+    let queue = [];
+    const e = new eng.LiveEngine({ proxy: true, targets: ["en"], language: "zh", llmChain: [{ id: "proxy" }], review: true })
+      .events({ line: (l) => lines.push(l), error() {}, draft() {}, interim() {}, status() {}, level() {}, review: (q) => { queue = q; } });
+    e.running = true;
+    e._send("我们要听神的声音。");
+    check("with review on, a heard line waits for the operator", queue.length === 1 && lines.length === 0);
+    check("…and no cheap provisional translation leaks out", e.cfg.interim === false);
+    e.approve(queue[0].rid, "我们要听神的声音！");
+    await e.translateQueue;
+    const shown = lines.filter((l) => !l.pending);
+    check("a line the operator edited is shown exactly as they wrote it", shown[0] && shown[0].src === "我们要听神的声音！", shown[0] && shown[0].src);
+    check("…translated with correction switched off", /DO NOT CORRECT/.test(chat[0] && chat[0].sys));
+    check("…keeping what was heard, for the review afterwards", shown[0] && shown[0].heard === "我们要听神的声音。");
+
+    e._send("而不是照着"); e._send("自己的决定去做。");
+    e.mergeNext(queue[0].rid);
+    check("two lines cut in the wrong place can be joined", queue.length === 1 && queue[0].text === "而不是照着自己的决定去做。", queue.map((r) => r.text).join(" | "));
+    e.discard(queue[0].rid);
+    check("a line can be dropped", queue.length === 0);
+
+    e.cfg.reviewAutoMs = 50;
+    e._send("第一句。"); e._send("第二句。");
+    e.edit(queue[1].rid, "第二句（改）。");
+    e.reviewQ[0].at -= 100; e.reviewQ[1].at -= 100;
+    const before = lines.length;
+    e._reviewTick();
+    check("auto-send takes what has waited long enough", lines.length === before + 1 && queue.length === 1);
+    check("…but never a line the operator is typing in", queue[0] && queue[0].text === "第二句（改）。");
+    e.setReview(false);
+    check("turning review off sends whatever is waiting", queue.length === 0 && lines.length === before + 2);
+    e.say("约翰福音 3:16");
+    check("the operator can type a line of their own", lines[lines.length - 1].src === "约翰福音3:16" || lines[lines.length - 1].src === "约翰福音 3:16", lines[lines.length - 1].src);
+    await e.translateQueue;
+  } finally {
+    globalThis.fetch = outer;
+  }
+
+  check("Burmese is offered, in Unicode Myanmar script", !!eng.LANGS.my && /UNICODE/.test(eng.LANGS.my.note) && !eng.LANGS.my.rtl);
+});
+
 /* ═══ 8. the relay survives a presenter reload ═══
    A reload republished v=1 over a stored v=40 (freezing every phone), and
    published an empty idle document (blanking every phone). Both are asserted,
