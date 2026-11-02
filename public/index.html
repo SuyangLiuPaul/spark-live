@@ -22,7 +22,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&family=Noto+Sans+Myanmar:wght@400;500;600&display=swap" />
-<link rel="stylesheet" href="/styles.css?v=26" />
+<link rel="stylesheet" href="/styles.css?v=27" />
 </head>
 <body>
 <div class="wrap">
@@ -85,58 +85,85 @@
       </div>
       <button class="primary" id="resumeBtn" data-i18n="resume">▶ Resume</button>
     </div>
-    <div class="meter"><i id="meterBar"></i></div>
-    <div class="row" style="margin-bottom:6px">
-      <button class="danger" id="stopBtn" data-i18n="stop">■ Stop</button>
-      <button id="pauseBtn" type="button" aria-pressed="false">⏸</button>
-      <button id="newBtn" style="display:none" data-i18n="newSession">↻ New session</button>
-      <button id="dlBtn" data-i18n="download">Download recording</button>
-      <button id="dlTextBtn" data-i18n="downloadText">Download transcript</button>
-      <button id="dlPdfBtn" data-i18n="downloadPdf">Download PDF</button>
-      <span class="langsel" id="dlLangs"></span>
-      <button id="reviewToggle" type="button" aria-pressed="false">✋</button>
-      <button id="settingsBtn" data-i18n="settings">⚙ Settings</button>
-      <span class="sub" id="statMsg"></span>
-    </div>
-    <div class="row" style="margin:2px 0 8px"><div class="langsel" id="previewLang"></div></div>
-    <div class="draft" id="draft">…</div>
-    <div class="err" id="err"></div>
-    <!-- Human review. Lines wait here instead of going straight to the room; see
-         the "human review" section of engine.js. -->
-    <section class="review" id="reviewPanel" hidden>
-      <div class="reviewhead">
-        <strong data-i18n="reviewHead">Waiting for your OK</strong>
-        <span class="rcount" id="reviewCount">0</span>
-        <span class="spacer"></span>
-        <label class="inline" for="reviewAuto" data-i18n="reviewAuto">Auto-send</label>
-        <select id="reviewAuto" class="mini">
-          <option value="0" data-i18n="reviewAutoOff">Off</option>
-          <option value="8000">8 s</option>
-          <option value="15000">15 s</option>
-          <option value="30000">30 s</option>
-        </select>
-        <span class="sizectl-r">
-          <button class="mini" id="rSmaller" type="button" aria-label="Smaller text">A−</button>
-          <button class="mini" id="rBigger" type="button" aria-label="Larger text">A+</button>
-        </span>
-        <button class="mini" id="reviewUndoBtn" type="button" hidden data-i18n="reviewUndo">↩ Undo remove</button>
-        <button class="mini" id="reviewAllBtn" type="button" data-i18n="reviewAll">Send all</button>
-      </div>
-      <div class="hint" data-i18n="reviewKeys">Enter = send · Del at the end of a line = remove · Shift+Enter = new line · Alt+↓ = join with the next line</div>
-      <!-- Above the list, so lines arriving never push this box down while someone types. -->
-      <div class="manual">
-        <input id="manualIn" autocomplete="off" data-i18n-ph="manualPh" placeholder="Type a line yourself and press Enter (a verse, a name…)" />
-        <button id="manualBtn" type="button" data-i18n="manualSend">Send</button>
-      </div>
-      <div class="reviewlist" id="reviewList"></div>
-      <div class="reviewempty" id="reviewEmpty" data-i18n="reviewEmpty">Nothing waiting. New sentences appear here as they are heard.</div>
-      <details class="heardlog" id="heardLog">
-        <summary data-i18n="heardLogHead">Everything heard — click a line to copy it into the box</summary>
-        <div id="heardList"></div>
+    <!-- The operator's control strip: what is happening, and the two things that change it. -->
+    <div class="livebar" id="liveBar">
+      <div class="lb-mic" title="Microphone level"><span data-i18n="micShort">Mic</span><div class="meter"><i id="meterBar"></i></div></div>
+      <button id="pauseBtn" class="lb-btn" type="button" aria-pressed="false">⏸</button>
+      <button id="reviewToggle" class="lb-btn" type="button" aria-pressed="false">✋</button>
+      <span class="spacer"></span>
+      <details class="more" id="moreMenu">
+        <summary class="lb-btn"><span data-i18n="more">⋯ More</span></summary>
+        <div class="morepanel">
+          <button id="dlBtn" data-i18n="download">Download recording</button>
+          <button id="dlTextBtn" data-i18n="downloadText">Download transcript</button>
+          <button id="dlPdfBtn" data-i18n="downloadPdf">Download PDF</button>
+          <span class="langsel" id="dlLangs"></span>
+          <button id="settingsBtn" data-i18n="settings">⚙ Settings</button>
+        </div>
       </details>
-    </section>
-    <hr style="border:none;border-top:1px solid var(--line);margin:14px 0" />
-    <div class="lines" id="lines"></div>
+      <button id="newBtn" class="lb-btn" style="display:none" data-i18n="newSession">↻ New session</button>
+      <button class="danger lb-btn" id="stopBtn" data-i18n="stop">■ Stop</button>
+    </div>
+    <div class="sub statmsg" id="statMsg" role="status"></div>
+    <div class="err" id="err" role="alert"></div>
+
+    <div class="livegrid">
+      <!-- LEFT: what the operator works on. -->
+      <div class="opcol">
+        <div class="nowhearing" id="nowHearing">
+          <div class="nh-label"><span class="nh-dot"></span><span data-i18n="hearingNow">Hearing now</span></div>
+          <div class="draft" id="draft">…</div>
+        </div>
+
+        <!-- Human review. Lines wait here instead of going straight to the room; see
+             the "human review" section of engine.js. -->
+        <section class="review" id="reviewPanel" hidden>
+          <div class="reviewhead">
+            <strong data-i18n="reviewHead">Waiting for your OK</strong>
+            <span class="rcount" id="reviewCount">0</span>
+            <span class="spacer"></span>
+            <button class="mini" id="reviewUndoBtn" type="button" hidden data-i18n="reviewUndo">↩ Undo remove</button>
+            <button class="mini" id="reviewAllBtn" type="button" data-i18n="reviewAll">Send all</button>
+          </div>
+          <div class="rtools">
+            <label class="inline" for="reviewAuto" data-i18n="reviewAuto">Auto-send</label>
+            <select id="reviewAuto" class="mini">
+              <option value="0" data-i18n="reviewAutoOff">Off</option>
+              <option value="8000">8 s</option>
+              <option value="15000">15 s</option>
+              <option value="30000">30 s</option>
+            </select>
+            <span class="spacer"></span>
+            <span class="sizectl-r">
+              <button class="mini" id="rSmaller" type="button" aria-label="Smaller text">A−</button>
+              <button class="mini" id="rBigger" type="button" aria-label="Larger text">A+</button>
+            </span>
+          </div>
+          <!-- Above the list, so lines arriving never push this box down while someone types. -->
+          <div class="manual">
+            <input id="manualIn" autocomplete="off" data-i18n-ph="manualPh" placeholder="Type a line yourself and press Enter (a verse, a name…)" />
+            <button id="manualBtn" type="button" data-i18n="manualSend">Send</button>
+          </div>
+          <div class="reviewlist" id="reviewList"></div>
+          <div class="reviewempty" id="reviewEmpty" data-i18n="reviewEmpty">Nothing waiting. New sentences appear here as they are heard.</div>
+          <div class="keyhint" data-i18n="reviewKeys">Enter = send · Del at the end of a line = remove · Shift+Enter = new line · Alt+↓ = join with the next line</div>
+          <details class="heardlog" id="heardLog">
+            <summary data-i18n="heardLogHead">Everything heard — click a line to copy it into the box</summary>
+            <div id="heardList"></div>
+          </details>
+        </section>
+      </div>
+
+      <!-- RIGHT: what the room is reading. Stays in view while the queue scrolls. -->
+      <div class="aircol" id="airCol">
+        <div class="air-head">
+          <span class="air-dot"></span><strong data-i18n="onAir">On air</strong>
+          <span class="spacer"></span>
+          <div class="langsel" id="previewLang"></div>
+        </div>
+        <div class="lines" id="lines"></div>
+      </div>
+    </div>
   </div>
 
   <!-- ══ AUDIENCE ══ -->

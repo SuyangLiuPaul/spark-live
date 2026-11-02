@@ -573,6 +573,11 @@ function renderDraft() {
   const d = $("draft");
   d.classList.toggle("big", reviewOn());
   d.classList.toggle("paused", !!(engine && engine.paused));
+  const nh = $("nowHearing");
+  if (nh) {
+    nh.classList.toggle("paused", !!(engine && engine.paused));
+    nh.classList.toggle("listening", !!(engine && engine.running && !engine.paused));
+  }
   if (engine && engine.paused) { d.textContent = t("pausedNote"); return; }
   const primary = activePreview();
   const rtl = (LANGS[primary] || {}).rtl;
@@ -1305,6 +1310,25 @@ $("pauseBtn").onclick = () => {
   }
 };
 
+/* The control strip and the top bar are both sticky; the On-air column needs to know how
+   far down they reach so it can stay in view beneath them. */
+function measureStick() {
+  const top = document.querySelector(".topbar"), bar = $("liveBar");
+  const th = top ? top.offsetHeight : 58;
+  const root = document.documentElement.style;
+  root.setProperty("--topbar-h", th + "px");
+  root.setProperty("--stick", th + (bar && bar.offsetHeight ? bar.offsetHeight : 52) + "px");
+}
+window.addEventListener("resize", measureStick);
+if (typeof ResizeObserver === "function") new ResizeObserver(measureStick).observe($("liveBar"));
+measureStick();
+
+/* "More" closes when you pick something or click away. */
+document.addEventListener("click", (e) => {
+  const m = $("moreMenu");
+  if (m && m.open && (!m.contains(e.target) || e.target.closest(".morepanel button"))) m.open = false;
+});
+
 /* Operator's text size, for reading from a little way back. */
 function applyRSize() {
   const n = Math.min(40, Math.max(14, Number(LS.get("rsize")) || 20));
@@ -1346,7 +1370,7 @@ function reviewRow(r) {
   el.className = "ritem";
   el.innerHTML = `<span class="rnum"></span><textarea rows="1" dir="auto" spellcheck="false"></textarea>
     <div class="ract">
-      <button type="button" class="rsend" title="${esc(t("reviewSendTip"))}">✓</button>
+      <button type="button" class="rsend" title="${esc(t("reviewSendTip"))}">${esc(t("sendEnter"))}</button>
       <button type="button" class="rmerge" title="${esc(t("reviewMergeTip"))}">⤓</button>
       <button type="button" class="rdrop" title="${esc(t("reviewDropTip"))}">✕</button>
     </div><i class="rbar"></i>`;
