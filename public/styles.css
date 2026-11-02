@@ -541,7 +541,7 @@ select.mini,button.mini{width:auto;padding:6px 10px;font-size:12.5px;border-radi
 .ritem:first-child{border-color:rgba(255,198,92,.6)}
 .ritem:focus-within{border-color:var(--accent)}
 .rnum{flex:none;width:22px;padding-top:9px;text-align:center;font-size:12px;font-weight:800;color:var(--faint)}
-.ritem textarea{flex:1;min-height:0;resize:none;overflow:hidden;font-size:17px;line-height:1.55;padding:7px 10px;background:var(--panel2)}
+.ritem textarea{flex:1;min-height:0;resize:none;overflow:hidden;font-size:calc(var(--rsize,20px) * .85);line-height:1.55;padding:7px 10px;background:var(--panel2)}
 .ract{flex:none;display:flex;gap:5px}
 .ract button{padding:7px 11px;font-size:15px;border-radius:9px;line-height:1}
 .ract .rsend{background:linear-gradient(180deg,#7dffb0,#2fc088);border-color:transparent;color:#04121f}
@@ -551,7 +551,7 @@ select.mini,button.mini{width:auto;padding:6px 10px;font-size:12.5px;border-radi
 .ritem.held .rbar{width:100% !important;transition:none !important;background:var(--accent)}
 .reviewempty{margin-top:10px;color:var(--faint);font-size:13px;font-style:italic}
 .reviewempty[hidden]{display:none}
-.manual{display:flex;gap:8px;margin-top:10px}
+.manual{display:flex;gap:8px;margin-top:8px}
 .manual input{flex:1}
 .manual button{padding:9px 14px}
 @media(max-width:560px){
@@ -562,3 +562,19 @@ select.mini,button.mini{width:auto;padding:6px 10px;font-size:12.5px;border-radi
 
 /* Burmese needs its own font (Windows 7 ships none) and room above and below the line. */
 [lang="my"]{font-family:"Noto Sans Myanmar","Myanmar Text","Padauk",sans-serif;line-height:2.1}
+
+/* The line to deal with now is the big one; the ones behind it wait, smaller and quieter,
+   so a burst of arrivals reads as a queue and not as a wall. */
+.ritem:first-child textarea,.ritem:focus-within textarea{font-size:var(--rsize,20px)}
+.ritem:not(:first-child):not(:focus-within){opacity:.72}
+.draft.big{font-style:normal;color:var(--fg);font-size:var(--rsize,20px);line-height:1.5;min-height:1.5em}
+.draft.paused{color:var(--warn);font-size:15px}
+.sizectl-r{display:inline-flex;gap:4px}
+#reviewUndoBtn{border-color:rgba(255,198,92,.55);color:var(--warn)}
+#reviewUndoBtn[hidden]{display:none}
+#pauseBtn[aria-pressed="true"]{background:rgba(255,198,92,.14);border-color:rgba(255,198,92,.7);color:var(--warn)}
+.heardlog{margin-top:10px;font-size:13px;color:var(--dim)}
+.heardlog summary{cursor:pointer}
+#heardList{display:flex;flex-direction:column;gap:4px;max-height:240px;overflow:auto;margin-top:6px}
+.heardrow{all:unset;display:block;cursor:pointer;padding:5px 8px;border-radius:7px;background:var(--panel2);color:var(--fg);font-size:14px;line-height:1.5}
+.heardrow:hover,.heardrow:focus-visible{outline:1px solid var(--accent)}

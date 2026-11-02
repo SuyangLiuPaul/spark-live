@@ -643,6 +643,72 @@ await section("Chinese lines and human review", async () => {
   check("Burmese is offered, in Unicode Myanmar script", !!eng.LANGS.my && /UNICODE/.test(eng.LANGS.my.note) && !eng.LANGS.my.rtl);
 });
 
+/* ═══ 7h. 2026-11-01 operator feedback — offline ═══
+   English turned into Malay on the Whisper fallback; Whisper lines cut mid-sentence;
+   a pause button; removing a line by mistake must be undoable. */
+await section("pause, undo and the Whisper fallback", async () => {
+  const eng = await import(path.join(ROOT, "public/engine.js"));
+  check("the service's language is read from what was said",
+        eng.inferLang("So I think that we have to go to the house of God and he is there") === "en"
+        && eng.inferLang("我们要听神的声音") === "zh" && eng.inferLang("佢係需要唞嘅") === "yue"
+        && eng.inferLang("Saya pergi ke pasar") === "");
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (u, init) => {
+    if (String(u).includes("/api/asr")) {
+      const lang = init.body.get("language") || "";
+      asked.push(lang);
+      return { ok: true, status: 200, json: async () => ({ text: "x", language: lang ? "English" : "Malay", words: [{ word: lang ? "right" : "salah", start: 0, end: 1 }] }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ content: "{}" }) };
+  };
+  try {
+    const make = (o = {}) => { const e = new eng.LiveEngine({ proxy: true, targets: ["en"], language: "auto", llmChain: [{ id: "proxy" }], review: true, ...o })
+      .events({ line() {}, error() {}, draft() {}, interim() {}, status() {}, level() {}, review() {}, heard() {} });
+      e.running = true; e.pool = new eng.KeyPool([]); return e; };
+    const e = make();
+    e._ctx.push({ id: 1, text: "So I think that we have to go to the house of God and he is there" });
+    const r = await e._whisper(new Blob(["x"]));
+    check("a guess of Malay in an English service is asked again in English",
+          asked.join() === ",en" && r.words[0].w === "right", asked.join());
+    await e._whisper(new Blob(["x"]));
+    check("…and the next minute goes straight to English, without paying twice", asked.join() === ",en,en", asked.join());
+    asked.length = 0;
+    const fresh = make();
+    const r2 = await fresh._whisper(new Blob(["x"]));
+    check("a talk with no history is taken at its word", asked.length === 1 && r2.words[0].w === "salah");
+    asked.length = 0;
+    const fixed = make({ language: "ms" });
+    await fixed._whisper(new Blob(["x"]));
+    check("a language the operator chose is never overruled", asked.join() === "ms");
+
+    const p = make();
+    p._gInterim = "Thank you for this morning and for";
+    p.pause();
+    check("pausing keeps what was already being heard", p.reviewQ.length === 1 && /this morning and for/.test(p.reviewQ[0].text), p.reviewQ.map((x) => x.text).join("|"));
+    p.useGemini = true;
+    const before = p.bufLen;
+    p._audio(new Float32Array(320), 16000);
+    check("nothing is sent to be recognised while paused", p.bufLen === before && !p.gasr);
+    p.useGemini = false; p.resume();
+    p._audio(new Float32Array(320), 16000);
+    check("resuming listens again", p.bufLen === 320 && !p.paused);
+
+    const u = make();
+    u._send("第一句。"); u._send("第二句。");
+    const gone = u.discard(u.reviewQ[0].rid);
+    u.restore(gone);
+    check("a removed line can be put back where it was", u.reviewQ.map((x) => x.text).join() === "第一句。,第二句。");
+
+    const w = make();
+    w.agree.prev = [{ w: "go", start: 0, end: 1 }, { w: "on.", start: 1, end: 2 }];
+    w.running = false;
+    await w.drain();
+    check("Stop keeps the last words Whisper had not confirmed", w.reviewQ.some((x) => /go on\./.test(x.text)), w.reviewQ.map((x) => x.text).join("|"));
+  } finally { globalThis.fetch = realFetch; }
+  check("the operator console has the new controls", /id="pauseBtn"/.test(fs.readFileSync(path.join(ROOT, "public/index.html"), "utf8")));
+});
+
 /* ═══ 8. the relay survives a presenter reload ═══
    A reload republished v=1 over a stored v=40 (freezing every phone), and
    published an empty idle document (blanking every phone). Both are asserted,

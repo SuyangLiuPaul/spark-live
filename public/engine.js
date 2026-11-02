@@ -134,6 +134,27 @@ const MAX_LINE_UNITS = 24;
 const CLAUSE_HARVEST_UNITS = 14;
 const MIN_CLAUSE_UNITS = 6;
 
+/* ── Whisper's language guess ──────────────────────────────────────────────
+ *
+ * With the source on Auto, Whisper guesses the language of every window on its own, and
+ * a few seconds of English can come back as Malay or Indonesian: reported 2026-11-01,
+ * when the Gemini credit ran out mid-service, the English sermon carried on in Malay.
+ * What has already been said is better evidence than one short window, so a guess that
+ * contradicts it is re-asked in the language of the service.
+ */
+const WHISPER_CODES = { english: "en", en: "en", chinese: "zh", mandarin: "zh", zh: "zh", cantonese: "yue", yue: "yue" };
+const LANG_PIN_MS = 60000;
+const EN_WORDS = /\b(the|and|that|you|we|is|are|to|of|in|it|for|have|this|not|he|his|god)\b/gi;
+/** "en", "zh", "yue", or "" when the text does not say. */
+export function inferLang(text) {
+  const t = String(text || "");
+  const han = (t.match(/\p{Script=Han}/gu) || []).length;
+  const latin = (t.match(/[A-Za-z]+/g) || []).length;
+  if (han >= 4 && han >= latin) return /[嘅咗哋唔喺]/.test(t) ? "yue" : "zh";
+  if (latin >= 5 && (t.match(EN_WORDS) || []).length / latin >= 0.2) return "en";
+  return "";
+}
+
 /** Cut a long sentence into readable lines, preferring the last comma before the limit. */
 export function splitLong(text, max = MAX_LINE_UNITS) {
   const all = toks(text);
@@ -1231,7 +1252,8 @@ export class LiveEngine {
       ...opts,
     };
     if (this.cfg.review) this.cfg.interim = false;
-    this.on = { draft: () => {}, interim: () => {}, line: () => {}, status: () => {}, error: () => {}, level: () => {}, review: () => {} };
+    this.on = { draft: () => {}, interim: () => {}, line: () => {}, status: () => {}, error: () => {}, level: () => {}, review: () => {}, heard: () => {} };
+    this.paused = false;       // listening switched off by the operator; recording continues
     this.reviewQ = [];         // lines waiting for the operator, oldest first
     this._rid = 0;
 
@@ -1404,6 +1426,7 @@ export class LiveEngine {
       // exactly when it was not needed; as customVocabulary it applies first.
       glossary: this.cfg.glossary,
       onInterim: (t) => {
+        if (this.paused) return;
         this._gInterim = t;
         // Take any sentence the server has already moved past, rather than
         // holding the whole utterance until it finalizes.
@@ -1414,6 +1437,9 @@ export class LiveEngine {
         this._interim(tail);
       },
       onFinal: (t) => {
+        if (this.paused) return;
+        // Whole, as recognised: the operator's way back to anything that went missing.
+        this.on.heard(t);
         this._gInterim = "";
         this.asrCalls = (this.asrCalls || 0) + 1;
         this.lastAsrAt = Date.now();
@@ -1467,7 +1493,9 @@ export class LiveEngine {
     // Streaming ASR consumes audio as it arrives, so the overlapping-window
     // buffer would only grow forever. Everything below — archive, level meter,
     // stall watchdog — is shared and still runs.
-    if (this.useGemini && this.gasr) {
+    if (this.paused) {
+      // Nothing is sent, so nothing is billed. The recording and the meter carry on.
+    } else if (this.useGemini && this.gasr) {
       this.gasr.push(pcm);
     } else {
       this.buf.push(pcm);
@@ -1503,7 +1531,7 @@ export class LiveEngine {
   _maybeTick() {
     if (!this.running) return;
     this._reviewTick();
-    if (this.busy) return;
+    if (this.busy || this.paused) return;
     // Streaming ASR: _tick() would return immediately (the overlap buffer is
     // empty by design), and the trailing-fragment flush lives inside it — so
     // without this a last part-sentence would sit unsent until Stop. Waiting
@@ -1697,10 +1725,8 @@ export class LiveEngine {
     try {
       const wav = encodeWav(pcm, 16000);
       this.asrCalls = (this.asrCalls || 0) + 1;
-      const { words } = await transcribeGroq({
-        blob: wav, pool: this.pool, proxy: this.cfg.proxy,
-        model: this.cfg.groqModel, language: this.cfg.language,
-      });
+      const { words } = await this._whisper(wav);
+      if (this.paused) return;
       // Budget came back on its own — say so, so the console stops showing a
       // quota warning that is no longer true.
       if (this.exhausted) {
@@ -1711,7 +1737,9 @@ export class LiveEngine {
       const { stable, cut } = this.agree.push(words);
       if (stable.length) {
         this._trim(cut);
-        this._commit(stable.map((w) => w.w).join(" "));
+        const piece = stable.map((w) => w.w).join(" ");
+        this.on.heard(piece);
+        this._commit(piece);
       } else if (seconds > MAX_WINDOW_S) {
         // Agreement never settled (music, crosstalk). Take the hypothesis as-is
         // rather than let the buffer grow forever.
@@ -1728,11 +1756,38 @@ export class LiveEngine {
       // Same rule as the streaming path: a pause sends a real chunk, not half a thought.
       const idle = Date.now() - this.lastVoiceAt;
       const tail2 = this.sentence.trim();
-      const chunky = units(toks(tail2)) >= FRAGMENT_MIN_WORDS || SENT_END_RE.test(tail2);
-      if (tail2 && ((idle > SILENCE_FLUSH_MS && chunky) || idle > FRAGMENT_PATIENCE_MS)) this._flushSentence();
+      // Whisper's committed text ends wherever two passes happened to agree, usually
+      // mid-sentence, and the short gaps between words read as "idle": measured on a
+      // clean recording, this cut "That is why Paul begins with the" / "words therefore…".
+      // So only a finished sentence, or a real stop, sends what is there. A speaker who
+      // does not finish still gets a line at the last comma once enough has built up.
+      if (tail2 && ((idle > SILENCE_FLUSH_MS && SENT_END_RE.test(tail2)) || idle > FRAGMENT_PATIENCE_MS)) this._flushSentence();
+      else if (tail2 && units(toks(tail2)) >= CLAUSE_HARVEST_UNITS) this._sendToLastClause();
     } finally {
       this.busy = false;
     }
+  }
+
+  /** One Whisper call, with the language guess held to what the service has been so far. */
+  async _whisper(blob) {
+    const ask = (language) => transcribeGroq({
+      blob, pool: this.pool, proxy: this.cfg.proxy, model: this.cfg.groqModel, language,
+    });
+    const chosen = this.cfg.language;
+    if (chosen && chosen !== "auto") return ask(chosen);
+    if (Date.now() < (this._langPinUntil || 0)) return ask(this._homeLang);
+    const res = await ask(chosen);
+    const said = String(res.language || "").trim().toLowerCase();
+    const known = WHISPER_CODES[said];
+    if (known) { this._homeLang = known; return res; }
+    // Not one of the languages this guard can vouch for. Only overrule it when the
+    // service has clearly been in another one; a talk that really is in Persian has
+    // no such history and is left alone.
+    const home = this._homeLang || inferLang(this._ctx.map((c) => c.text).join(" "));
+    if (!said || !home) return res;
+    this._homeLang = home;
+    this._langPinUntil = Date.now() + LANG_PIN_MS;
+    return ask(home);
   }
 
   /**
@@ -1977,6 +2032,20 @@ Reply with JSON only: {"t":"..."}`;
     for (const piece of splitLong(s)) this._send(piece);
   }
 
+  /** Send up to the last comma in the buffer, keeping what follows it. */
+  _sendToLastClause() {
+    const all = toks(this.sentence);
+    let acc = 0, cut = -1;
+    for (let i = 0; i < all.length - 1; i++) {
+      acc += units([all[i]]);
+      if (CLAUSE_END_RE.test(all[i]) && acc >= MIN_CLAUSE_UNITS) cut = i;
+    }
+    if (cut < 0) return;
+    this.sentence = joinToks(all.slice(cut + 1));
+    this.pendingSince = Date.now();
+    this._send(joinToks(all.slice(0, cut + 1)));
+  }
+
   _send(source) {
     this.on.interim(""); this._interimSrc = "";
     // History for repeat detection is about what the RECOGNISER produced, so it is
@@ -2037,7 +2106,15 @@ Reply with JSON only: {"t":"..."}`;
   discard(rid) {
     const i = this._ri(rid);
     if (i < 0) return;
-    this.reviewQ.splice(i, 1);
+    const [item] = this.reviewQ.splice(i, 1);
+    this._emitReview();
+    return { item, index: i };
+  }
+
+  /** Undo a discard: the line goes back where it was, with a fresh wait. */
+  restore({ item, index }) {
+    if (!item) return;
+    this.reviewQ.splice(Math.min(index, this.reviewQ.length), 0, { ...item, hold: false, at: Date.now() });
     this._emitReview();
   }
 
@@ -2071,6 +2148,45 @@ Reply with JSON only: {"t":"..."}`;
   say(text) {
     const t = tidyText(text);
     if (t) this._dispatch(t, { strict: true });
+  }
+
+  /**
+   * Stop listening for a while — worship, announcements — so nothing new arrives and
+   * nothing is billed, while the recording carries on and typed lines still go out.
+   * What was heard up to now is kept. The streaming session is closed rather than fed
+   * silence: an hour of silence costs the same as an hour of speech.
+   */
+  pause() {
+    if (this.paused || !this.running) return;
+    this._takePending();
+    this._flushSentence();
+    this.paused = true;
+    if (this.gasr) { this.gasr.stop(); this.gasr = null; }
+    this.buf = []; this.bufLen = 0; this.agree.reset();
+    this.on.interim(""); this.on.draft("");
+    this.on.status({ running: true, paused: true });
+  }
+
+  resume() {
+    if (!this.paused) return;
+    this.paused = false;
+    this._gInterim = ""; this._gUttEmitted = "";
+    if (this.translateMode) this._startTranslate();
+    else if (this.useGemini) this._startGemini();
+    this.lastVoiceAt = this.lastTickAt = this.lastAsrAt = Date.now();
+    this.on.status({ running: true, paused: false });
+  }
+
+  /** Move what has been heard but not settled into the sentence buffer. */
+  _takePending() {
+    if (this._tl) this._tlEmit(true);
+    if (this._gInterim) {
+      const rest = this._dropRepeated(this._unharvested(this._gInterim));
+      this._gInterim = ""; this._gUttEmitted = "";
+      if (rest) this._commit(rest);
+    }
+    const tail = this.agree.pendingText();
+    if (tail) { this.agree.reset(); this._commit(tail); }
   }
 
   /** Turn review on or off mid-service. Turning it off sends whatever is waiting. */
@@ -2176,15 +2292,11 @@ Reply with JSON only: {"t":"..."}`;
   /** Finish the current sentence and wait for the queue to drain. */
   async drain() {
     if (this._tl) this._tlEmit(true);
-    // What the recogniser has heard but not finalised is part of the service too.
-    // Stop used to throw it away — with a speaker who never paused, that was most
-    // of what they said. Only after stop(): mid-session (the recording download)
-    // the final is still coming and will carry it.
-    if (!this.running && this._gInterim) {
-      const rest = this._dropRepeated(this._unharvested(this._gInterim));
-      this._gInterim = ""; this._gUttEmitted = "";
-      if (rest) this._commit(rest);
-    }
+    // What the recogniser has heard but not settled is part of the service too. Stop
+    // used to throw it away — with a speaker who never paused, that was most of what
+    // they said. Only after stop(): mid-session (the recording download) the final is
+    // still coming and will carry it.
+    if (!this.running) this._takePending();
     this._flushSentence();
     await this.translateQueue;
     // The recorder's last slice lands after stop(); without this the download

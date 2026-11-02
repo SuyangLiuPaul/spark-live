@@ -570,6 +570,10 @@ const showErr = (m) => { $("err").textContent = m || ""; };
 // only does when review is off, because with review on nothing unapproved goes out.
 let localDraft = "";
 function renderDraft() {
+  const d = $("draft");
+  d.classList.toggle("big", reviewOn());
+  d.classList.toggle("paused", !!(engine && engine.paused));
+  if (engine && engine.paused) { d.textContent = t("pausedNote"); return; }
   const primary = activePreview();
   const rtl = (LANGS[primary] || {}).rtl;
   $("draft").innerHTML = doc.interim
@@ -704,6 +708,7 @@ async function beginCapture({ resume = false } = {}) {
       if (pub !== doc.draft) { doc.draft = pub; schedulePush(); }
     },
     review: (list) => renderReview(list),
+    heard: (text) => addHeard(text),
     interim: (t) => { doc.interim = t || ""; renderDraft(); schedulePush(); },
     error: (e) => {
       const msg = String(e && e.message ? e.message : e);
@@ -776,6 +781,7 @@ async function beginCapture({ resume = false } = {}) {
       }
       // The microphone came back — clear the warning, or the console keeps
       // accusing an input that is working again.
+      if (s.paused !== undefined) syncPauseUi();
       if (s.stalled === false) { showErr(""); toast(t("micBack"), "ok"); }
       // The pool refills on its own; clear the quota warning when it does,
       // otherwise the console keeps accusing a budget that has come back.
@@ -850,7 +856,7 @@ async function beginCapture({ resume = false } = {}) {
   schedulePush();
 
   renderPreviewLang();
-  syncReviewUi();
+  syncPauseUi();
   $("setupPanel").style.display = "none";
   $("livePanel").style.display = "";
   $("resumeBar").hidden = true;
@@ -898,6 +904,7 @@ $("stopBtn").onclick = async () => {
   $("statePill").className = "pill ended";
   $("statMsg").textContent = t("endedMsg");
   $("stopBtn").style.display = "none";
+  $("pauseBtn").style.display = "none";
   $("newBtn").style.display = "";
 };
 
@@ -1210,7 +1217,8 @@ const rEls = new Map();            // rid -> row element
 
 function syncReviewUi() {
   const on = reviewOn();
-  $("reviewPanel").hidden = !on;
+  // While paused the type-your-own box is the whole point, review or no review.
+  $("reviewPanel").hidden = !(on || (engine && engine.paused));
   const b = $("reviewToggle");
   b.textContent = on ? t("reviewBtnOn") : t("reviewBtnOff");
   b.setAttribute("aria-pressed", on ? "true" : "false");
@@ -1257,7 +1265,71 @@ function sendRow(rid) {
   if (!el || !engine) return;
   engine.approve(rid, el.querySelector("textarea").value);
 }
-function dropRow(rid) { if (engine) engine.discard(rid); }
+let lastDropped = null;
+function dropRow(rid) {
+  if (!engine) return;
+  const next = rEls.get(rid) && rEls.get(rid).nextElementSibling;
+  const nextRid = next ? [...rEls].find(([, el]) => el === next)?.[0] : null;
+  lastDropped = engine.discard(rid) || null;
+  $("reviewUndoBtn").hidden = !lastDropped;
+  // Straight on to the line that took its place, not back to the top.
+  if (nextRid != null) focusRow(nextRid);
+}
+$("reviewUndoBtn").onclick = () => {
+  if (!engine || !lastDropped) return;
+  const rid = lastDropped.item.rid;
+  engine.restore(lastDropped);
+  lastDropped = null;
+  $("reviewUndoBtn").hidden = true;
+  focusRow(rid);
+};
+
+/* Pause listening: worship, announcements. Typed lines still go out. */
+function syncPauseUi() {
+  const b = $("pauseBtn");
+  const paused = !!(engine && engine.paused);
+  b.textContent = paused ? t("resumeListen") : t("pauseListen");
+  b.setAttribute("aria-pressed", paused ? "true" : "false");
+  $("statePill").textContent = !engine || !engine.running ? $("statePill").textContent : paused ? t("statePaused") : t("stateLive");
+  syncReviewUi();
+  renderDraft();
+}
+$("pauseBtn").onclick = () => {
+  if (!engine || !engine.running) return;
+  if (engine.paused) { engine.resume(); mark("resume", t("markListenOn")); }
+  else {
+    engine.pause();
+    mark("pause", t("markListenOff"));
+    doc.draft = ""; doc.interim = ""; schedulePush();
+    $("manualIn").focus({ preventScroll: true });
+  }
+};
+
+/* Operator's text size, for reading from a little way back. */
+function applyRSize() {
+  const n = Math.min(40, Math.max(14, Number(LS.get("rsize")) || 20));
+  document.documentElement.style.setProperty("--rsize", n + "px");
+  for (const ta of document.querySelectorAll("#reviewList textarea")) fit(ta);
+}
+$("rSmaller").onclick = () => { LS.set("rsize", String(Math.max(14, (Number(LS.get("rsize")) || 20) - 2))); applyRSize(); };
+$("rBigger").onclick = () => { LS.set("rsize", String(Math.min(40, (Number(LS.get("rsize")) || 20) + 2))); applyRSize(); };
+applyRSize();
+
+/* Everything the recogniser settled, whole and untouched: the way back to a sentence
+   that went missing from the live line or was removed by mistake. */
+const HEARD_KEEP = 200;
+function addHeard(text) {
+  const box = $("heardList");
+  const row = document.createElement("button");
+  row.type = "button"; row.className = "heardrow"; row.textContent = text;
+  row.onclick = () => {
+    const m = $("manualIn");
+    m.value = m.value ? m.value + " " + text : text;
+    m.focus({ preventScroll: true });
+  };
+  box.prepend(row);
+  while (box.children.length > HEARD_KEEP) box.lastChild.remove();
+}
 function mergeRow(rid) {
   const el = rEls.get(rid);
   const nx = el && el.nextElementSibling;
@@ -1290,6 +1362,9 @@ function reviewRow(r) {
     // An IME (Chinese, Persian…) uses Enter to pick characters; that Enter is not ours.
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); sendRow(r.rid); }
+    // At the end of the text Del has nothing to delete, which is where the cursor rests
+    // on a line just arrived. Inside the text it keeps its ordinary job while editing.
+    else if (e.key === "Delete" && ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length) { e.preventDefault(); dropRow(r.rid); }
     else if (e.key === "ArrowDown" && e.altKey) { e.preventDefault(); mergeRow(r.rid); }
   });
   el.querySelector(".rsend").onclick = () => sendRow(r.rid);
@@ -1354,7 +1429,7 @@ $("manualIn").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); sendManual(); }
 });
 syncReviewUi();
-window.addEventListener("ui:lang", syncReviewUi);
+window.addEventListener("ui:lang", syncPauseUi);
 
 window.addEventListener("beforeunload", (e) => {
   if (engine && doc.live) { e.preventDefault(); e.returnValue = ""; }
